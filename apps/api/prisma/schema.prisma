@@ -1,0 +1,87 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["fullTextSearchPostgres"]
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Link {
+  id        String   @id @default(cuid())
+  tenantId  String
+  code      String
+  longUrl   String
+  createdAt DateTime @default(now())
+  createdBy String
+  expiresAt DateTime?
+  tags      String[] @default([])
+
+  clicks   LinkClick[]
+  comments Comment[]
+
+  @@unique([tenantId, code])
+  @@index([createdBy])
+}
+
+model LinkClick {
+  id        String   @id @default(cuid())
+  linkId    String
+  link      Link     @relation(fields: [linkId], references: [id], onDelete: Cascade)
+  requestId String   @unique
+  ipHash    String
+  userAgent String?
+  referer   String?
+  timestamp DateTime @default(now())
+
+  @@index([linkId])
+  @@index([timestamp])
+}
+
+model Team {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  members   TeamMember[]
+}
+
+enum TeamRole {
+  ADMIN
+  MEMBER
+}
+
+model TeamMember {
+  teamId   String
+  userId   String
+  role     TeamRole @default(MEMBER)
+  joinedAt DateTime @default(now())
+
+  team Team @relation(fields: [teamId], references: [id])
+
+  @@id([teamId, userId])
+}
+
+model ActivityEvent {
+  id        String   @id @default(cuid())
+  teamId    String
+  userId    String
+  type      String
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  @@index([teamId, createdAt])
+}
+
+model Comment {
+  id        String   @id @default(cuid())
+  linkId    String
+  userId    String
+  content   String
+  createdAt DateTime @default(now())
+
+  link Link @relation(fields: [linkId], references: [id], onDelete: Cascade)
+
+  @@index([linkId, createdAt])
+}

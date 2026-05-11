@@ -1,0 +1,29 @@
+Module 03 Core API Evidence
+
+1) Health check
+curl -i http://localhost:3000/health
+HTTP/1.1 200 OK
+{"ok":true}
+
+2) Create link (tenant-scoped via headers)
+curl -i -X POST http://localhost:3000/links \
+  -H 'Content-Type: application/json' \
+  -H 'x-tenant-id: acme' \
+  -H 'x-created-by: user_1' \
+  -d '{"long_url":"https://example.com"}'
+HTTP/1.1 201 Created
+{"code":"acme_0rfoNVlE","short_url":"/r/acme_0rfoNVlE","long_url":"https://example.com",...}
+
+3) Redirect by code (/r/<code>)
+curl -i http://localhost:3000/r/acme_0rfoNVlE
+HTTP/1.1 302 Found
+Location: https://example.com
+
+4) Validation abuse check (reject javascript:)
+curl -i -X POST http://localhost:3000/links \
+  -H 'Content-Type: application/json' \
+  -H 'x-tenant-id: acme' \
+  -H 'x-created-by: user_1' \
+  -d '{"long_url":"javascript:alert(1)"}'
+HTTP/1.1 400 Bad Request
+{"error":"long_url must be a valid http(s) URL"}

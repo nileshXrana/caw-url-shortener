@@ -1,0 +1,88 @@
+{
+  "nonce": "",
+  "events": [
+    {
+      "module": 2,
+      "step": "reflect",
+      "event_type": "module_evaluation",
+      "data": {
+        "narrative": "Student demonstrated a total shift from narrative to top-down structure. Their migration plan rewrite reduced word count by 47% while significantly improving scannability and accountability through the use of tables and active voice.",
+        "overall": 5,
+        "dimension_scores": [
+          {
+            "key": "review_quality",
+            "score": 5,
+            "observation": "Identified all 6 clarity problems in the legacy document, including the exact word count to reach the buried lede.",
+            "evidence": "appears in paragraph 4, after ~280 words."
+          },
+          {
+            "key": "writing_clarity",
+            "score": 5,
+            "observation": "Rewrite was exceptionally concise (~185 words) and eliminated all noise phrases.",
+            "evidence": "We are migrating our API from REST to GraphQL over 8 weeks, starting [date]."
+          },
+          {
+            "key": "audience_awareness",
+            "score": 4,
+            "observation": "Correctly defined all acronyms for a junior audience.",
+            "evidence": "SRE (Site Reliability Engineering)"
+          },
+          {
+            "key": "structure_quality",
+            "score": 5,
+            "observation": "Used H1/H2 hierarchy and tables to ensure information was discoverable.",
+            "evidence": "Used a Week/Owner/Milestone table for the timeline."
+          },
+          {
+            "key": "actionability",
+            "score": 4,
+            "observation": "Assigned specific owners to risk mitigation.",
+            "evidence": "the SRE team adds query depth limits"
+          }
+        ],
+        "strengths": [
+          "Exceptional structural thinking: recognized that moving the lede to the top is more effective than line-by-line editing."
+        ],
+        "growth_areas": [],
+        "recommendation": "In Module 03, focus on the Alternatives Considered section—it is the ultimate test of tradeoff communication.",
+        "public_evidence": [
+          {
+            "artifact": "docs/MIGRATION_PLAN.md",
+            "student_action": "Rewrote a 350-word buried-lede document into a 185-word top-down execution plan with ownership tables.",
+            "technical_detail": "Technical migration documentation structure and scannability.",
+            "proof": "~185 words, decision in sentence 1, scannable table for timeline.",
+            "ability": "Advanced technical writing and structural clarity.",
+            "reviewer_value": "Demonstrates the ability to communicate complex architectural changes (REST to GraphQL) in a high-utility, executive-friendly format.",
+            "confidence": "demonstrated"
+          }
+        ],
+        "student_knowledge": {
+          "terminology_gaps": [],
+          "concepts_demonstrated": [
+            {
+              "concept": "Top-down structure",
+              "evidence": "Moved the GraphQL decision to the first sentence."
+            },
+            {
+              "concept": "Buried lede identification",
+              "evidence": "Found the decision 280 words deep in the original text."
+            }
+          ],
+          "teaching_approaches": [
+            {
+              "concept": "Top-down structure",
+              "approach": "example",
+              "detail": "Compared the legacy wall-of-text to the student's scannable rewrite.",
+              "effective": true
+            }
+          ],
+          "effective_level": "intermediate",
+          "learning_style_signals": [
+            "structural_learner"
+          ],
+          "confidence_level": "high"
+        }
+      }
+    }
+  ]
+}

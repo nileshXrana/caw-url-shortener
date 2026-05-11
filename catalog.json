@@ -1,0 +1,348 @@
+{
+  "session_id": null,
+  "module": null,
+  "step": null,
+  "content": "Loaded 6 skill(s); 17 free module(s); 8 module(s) completed",
+  "achievements": [
+    "catalog_loaded"
+  ],
+  "data": {
+    "skills": [
+      {
+        "id": "sk_e7b4a08057e6c3296800",
+        "slug": "ai-augmented-engineering",
+        "name": "AI-Augmented Engineering",
+        "description": "Build a complete feature using AI coding agents — never write code, only prompt, review, and decide",
+        "modules_count": 8,
+        "estimated_hours": "",
+        "packs": [
+          {
+            "slug": "launchpad",
+            "name": "Launchpad",
+            "description": "",
+            "order": 1,
+            "module_numbers": [
+              1,
+              2,
+              3
+            ],
+            "access_state": "unlocked",
+            "source": null
+          },
+          {
+            "slug": "practitioner",
+            "name": "Practitioner",
+            "description": "",
+            "order": 2,
+            "module_numbers": [
+              4,
+              5,
+              6
+            ],
+            "access_state": "locked",
+            "source": null
+          },
+          {
+            "slug": "operator",
+            "name": "Operator",
+            "description": "",
+            "order": 3,
+            "module_numbers": [
+              7,
+              8
+            ],
+            "access_state": "locked",
+            "source": null
+          }
+        ],
+        "has_active_session": false,
+        "session_progress": null,
+        "completed_sessions": 0
+      },
+      {
+        "id": "sk_220a4dc6f9fc28e7b2f9",
+        "slug": "debugging-incident-response",
+        "name": "Debugging & Incident Response",
+        "description": "Diagnose and fix 10 hidden bugs in a URL shortener lab service under simulated production pressure, including mock stakeholder incidents",
+        "modules_count": 7,
+        "estimated_hours": "",
+        "packs": [
+          {
+            "slug": "launchpad",
+            "name": "Launchpad",
+            "description": "",
+            "order": 1,
+            "module_numbers": [
+              1,
+              2,
+              3
+            ],
+            "access_state": "unlocked",
+            "source": null
+          },
+          {
+            "slug": "practitioner",
+            "name": "Practitioner",
+            "description": "",
+            "order": 2,
+            "module_numbers": [
+              4,
+              5
+            ],
+            "access_state": "locked",
+            "source": null
+          },
+          {
+            "slug": "operator",
+            "name": "Operator",
+            "description": "",
+            "order": 3,
+            "module_numbers": [
+              6,
+              7
+            ],
+            "access_state": "locked",
+            "source": null
+          }
+        ],
+        "has_active_session": true,
+        "session_progress": {
+          "current_module": 1,
+          "current_step": "pretest",
+          "modules_completed": 0,
+          "progress_percent": 0,
+          "last_active": "2026-05-10T16:58:55.134Z"
+        },
+        "completed_sessions": 0
+      },
+      {
+        "id": "sk_6c2a9da0684cd5b58330",
+        "slug": "decomposition-execution-planning",
+        "name": "Decomposition & Execution Planning",
+        "description": "Break big requirements into buildable chunks, order by dependency and risk, and execute with parallel AI workstreams",
+        "modules_count": 8,
+        "estimated_hours": "",
+        "packs": [
+          {
+            "slug": "launchpad",
+            "name": "Launchpad",
+            "description": "",
+            "order": 1,
+            "module_numbers": [
+              1,
+              2,
+              3
+            ],
+            "access_state": "unlocked",
+            "source": null
+          },
+          {
+            "slug": "practitioner",
+            "name": "Practitioner",
+            "description": "",
+            "order": 2,
+            "module_numbers": [
+              4,
+              5,
+              6
+            ],
+            "access_state": "awaiting_unlock",
+            "source": null
+          },
+          {
+            "slug": "operator",
+            "name": "Operator",
+            "description": "",
+            "order": 3,
+            "module_numbers": [
+              7,
+              8
+            ],
+            "access_state": "locked",
+            "source": null
+          }
+        ],
+        "has_active_session": true,
+        "session_progress": {
+          "current_module": 4,
+          "current_step": "context",
+          "modules_completed": 3,
+          "progress_percent": 38,
+          "last_active": "2026-05-10T14:04:56.216Z"
+        },
+        "completed_sessions": 0
+      },
+      {
+        "id": "sk_9eab816455b828ea7dff",
+        "slug": "production-readiness",
+        "name": "Production Readiness",
+        "description": "Take a working service and make it production-ready: containerize, add CI/CD, instrument with monitoring, test failure modes, write runbooks, deploy to real infrastructure.",
+        "modules_count": 8,
+        "estimated_hours": "",
+        "packs": [
+          {
+            "slug": "launchpad",
+            "name": "Launchpad",
+            "description": "",
+            "order": 1,
+            "module_numbers": [
+              1,
+              2,
+              3
+            ],
+            "access_state": "unlocked",
+            "source": null
+          },
+          {
+            "slug": "practitioner",
+            "name": "Practitioner",
+            "description": "",
+            "order": 2,
+            "module_numbers": [
+              4,
+              5,
+              6
+            ],
+            "access_state": "locked",
+            "source": null
+          },
+          {
+            "slug": "operator",
+            "name": "Operator",
+            "description": "",
+            "order": 3,
+            "module_numbers": [
+              7,
+              8
+            ],
+            "access_state": "locked",
+            "source": null
+          }
+        ],
+        "has_active_session": false,
+        "session_progress": null,
+        "completed_sessions": 0
+      },
+      {
+        "id": "sk_16b210cac047644e2654",
+        "slug": "system-design-fundamentals",
+        "name": "System Design Fundamentals",
+        "description": "Build a production-ready URL shortener with system design best practices",
+        "modules_count": 10,
+        "estimated_hours": "",
+        "packs": [
+          {
+            "slug": "launchpad",
+            "name": "Launchpad",
+            "description": "",
+            "order": 1,
+            "module_numbers": [
+              1,
+              2,
+              3
+            ],
+            "access_state": "unlocked",
+            "source": null
+          },
+          {
+            "slug": "practitioner",
+            "name": "Practitioner",
+            "description": "",
+            "order": 2,
+            "module_numbers": [
+              4,
+              5,
+              6,
+              7
+            ],
+            "access_state": "awaiting_unlock",
+            "source": null
+          },
+          {
+            "slug": "operator",
+            "name": "Operator",
+            "description": "",
+            "order": 3,
+            "module_numbers": [
+              8,
+              9,
+              10
+            ],
+            "access_state": "locked",
+            "source": null
+          }
+        ],
+        "has_active_session": true,
+        "session_progress": {
+          "current_module": 4,
+          "current_step": "context",
+          "modules_completed": 3,
+          "progress_percent": 30,
+          "last_active": "2026-05-10T12:30:07.224Z"
+        },
+        "completed_sessions": 0
+      },
+      {
+        "id": "sk_ac9e6eb26b4002765915",
+        "slug": "technical-communication",
+        "name": "Technical Communication",
+        "description": "Multi-format communication challenge: review real PRs, write a design doc, conduct a postmortem, explain a technical decision to a non-technical stakeholder.",
+        "modules_count": 6,
+        "estimated_hours": "",
+        "packs": [
+          {
+            "slug": "launchpad",
+            "name": "Launchpad",
+            "description": "",
+            "order": 1,
+            "module_numbers": [
+              1,
+              2
+            ],
+            "access_state": "unlocked",
+            "source": null
+          },
+          {
+            "slug": "practitioner",
+            "name": "Practitioner",
+            "description": "",
+            "order": 2,
+            "module_numbers": [
+              3,
+              4
+            ],
+            "access_state": "awaiting_unlock",
+            "source": null
+          },
+          {
+            "slug": "operator",
+            "name": "Operator",
+            "description": "",
+            "order": 3,
+            "module_numbers": [
+              5,
+              6
+            ],
+            "access_state": "locked",
+            "source": null
+          }
+        ],
+        "has_active_session": true,
+        "session_progress": {
+          "current_module": 3,
+          "current_step": "context",
+          "modules_completed": 2,
+          "progress_percent": 33,
+          "last_active": "2026-05-10T16:56:18.721Z"
+        },
+        "completed_sessions": 0
+      }
+    ],
+    "total_free_modules": 17,
+    "total_modules_completed": 8,
+    "access_changes": {
+      "has_any_change": false,
+      "skills": []
+    }
+  }
+}
