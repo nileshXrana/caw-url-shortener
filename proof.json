@@ -1,9 +1,0 @@
-{
-  "summary": "Submitted Module 5 evaluation report and completed all reflection questions on triage logic, stakeholder communications, and postmortem planning.",
-  "evidence": [
-    "Submitted module evaluation payload with overall score 5/5. Nonce mapping successfully verified by upsk CLI."
-  ],
-  "artifacts": [
-    "apps/api/src/main.ts"
-  ]
-}

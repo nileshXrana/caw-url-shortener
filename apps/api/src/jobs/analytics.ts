@@ -3,6 +3,7 @@ import { config } from "../config";
 import { logger } from "../logger";
 import { getDb } from "../db";
 import { createHash } from "crypto";
+import { cacheService } from "../redis";
 
 const REDIS_OPTIONS = {
   connection: {
@@ -31,9 +32,19 @@ const getTimestampBucket = (timestamp: string) => {
   return bucket;
 };
 
-export const processClickJob = async (job: { data: ClickJobData }) => {
+export const processClickJob = async (job: { id?: string; data: ClickJobData }) => {
+  const jobId = job.id;
+  
+  if (jobId) {
+    const isProcessed = await cacheService.isJobProcessed(jobId);
+    if (isProcessed) {
+      logger.warn("Duplicate job execution prevented via Redis dedup namespace", { jobId });
+      return;
+    }
+  }
+
   const { linkId, requestId, ip, userAgent, referer, timestamp } = job.data;
-  const db = getDb(config.databaseUrl);
+  const db = getDb(config.databaseUrl, 3);
   const ipHash = hashIp(ip);
   const timestampBucket = getTimestampBucket(timestamp);
   const clickedAt = new Date(timestamp);
@@ -60,15 +71,19 @@ export const processClickJob = async (job: { data: ClickJobData }) => {
           "lastAccessedAt" = GREATEST("AnalyticsBucket"."lastAccessedAt", EXCLUDED."lastAccessedAt")
       `;
     });
+
+    if (jobId) {
+      await cacheService.markJobProcessed(jobId);
+    }
+    
     logger.info("Recorded click", { linkId, requestId });
   } catch (err: any) {
-    // P2002 is Prisma's unique constraint violation (idempotency)
     if (err.code === "P2002") {
       logger.warn("Duplicate click ignored", { requestId });
       return;
     }
     logger.error("Failed to record click", err, { requestId });
-    throw err; // BullMQ will retry
+    throw err;
   }
 };
 
@@ -79,6 +94,13 @@ export const startAnalyticsWorker = () => {
     {
       ...REDIS_OPTIONS,
       concurrency: 5,
+      defaultJobOptions: {
+        attempts: 3,
+        backoff: {
+          type: "exponential",
+          delay: 1000,
+        },
+      },
     }
   );
 

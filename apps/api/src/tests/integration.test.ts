@@ -345,5 +345,85 @@ describe("Integration Tests", () => {
       expect(bucket?.count).toBe(2);
       expect(bucket?.lastAccessedAt.toISOString()).toBe(lateTimestamp);
     });
+
+    it("should prevent duplicate analytics events when link is deleted and recreated using isolated namespaces", async () => {
+      const { processClickJob } = await import("../jobs/analytics");
+      const { cacheService } = await import("../redis");
+
+      // 1. Create link
+      const link1 = await db.link.create({
+        data: {
+          id: uuidv4(),
+          tenantId: "tenant-a",
+          code: "tenant-a_recreate_test",
+          longUrl: "https://url1.com",
+          createdBy: "user-a"
+        }
+      });
+
+      // 2. Fetch redirect to cache it
+      await request(app).get(`/r/tenant-a_recreate_test`);
+
+      // 3. Process click job
+      const jobId = "recreate-test-job-id";
+      await processClickJob({
+        id: jobId,
+        data: {
+          linkId: link1.id,
+          requestId: jobId,
+          ip: "1.2.3.4",
+          timestamp: new Date().toISOString()
+        }
+      });
+
+      // Verify click was processed
+      const clickCount1 = await db.linkClick.count({ where: { linkId: link1.id } });
+      expect(clickCount1).toBe(1);
+
+      // Verify dedup key is set and redirect cache is set
+      const isJobProcessed = await cacheService.isJobProcessed(jobId);
+      expect(isJobProcessed).toBe(true);
+
+      const redirectTarget = await cacheService.getRedirectTarget("tenant-a_recreate_test");
+      expect(redirectTarget).not.toBeNull();
+
+      // 4. Delete the link
+      await request(app)
+        .delete(`/links/${link1.id}`)
+        .set("Authorization", `Bearer ${tokenA}`);
+
+      // Verify redirect cache is invalidated, but dedup is NOT invalidated
+      const redirectTargetAfterDelete = await cacheService.getRedirectTarget("tenant-a_recreate_test");
+      expect(redirectTargetAfterDelete).toBeNull();
+
+      const isJobProcessedAfterDelete = await cacheService.isJobProcessed(jobId);
+      expect(isJobProcessedAfterDelete).toBe(true); // Should remain true!
+
+      // 5. Recreate link with same short code
+      const link2 = await db.link.create({
+        data: {
+          id: uuidv4(),
+          tenantId: "tenant-a",
+          code: "tenant-a_recreate_test",
+          longUrl: "https://url2.com",
+          createdBy: "user-a"
+        }
+      });
+
+      // Try processing the same job again
+      await processClickJob({
+        id: jobId,
+        data: {
+          linkId: link2.id,
+          requestId: jobId,
+          ip: "1.2.3.4",
+          timestamp: new Date().toISOString()
+        }
+      });
+
+      // Click should be ignored since dedup flag was preserved
+      const clickCount2 = await db.linkClick.count({ where: { linkId: link2.id } });
+      expect(clickCount2).toBe(0);
+    });
   });
 });

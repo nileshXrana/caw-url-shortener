@@ -4,18 +4,18 @@ import { Pool } from "pg";
 
 const clients = new Map<string, { pool: Pool; prisma: PrismaClient }>();
 
-export function getDb(databaseUrl: string): PrismaClient {
-  if (clients.has(databaseUrl)) return clients.get(databaseUrl)!.prisma;
+export function getDb(databaseUrl: string, maxConnections = 17): PrismaClient {
+  const cacheKey = `${databaseUrl}:${maxConnections}`;
+  if (clients.has(cacheKey)) return clients.get(cacheKey)!.prisma;
 
-  const pool = new Pool({ connectionString: databaseUrl });
+  const pool = new Pool({ connectionString: databaseUrl, max: maxConnections });
   const adapter = new PrismaPg(pool);
   const prisma = new PrismaClient({ adapter });
 
-  clients.set(databaseUrl, { pool, prisma });
+  clients.set(cacheKey, { pool, prisma });
   return prisma;
 }
 
-// Call during graceful shutdown to close all pools
 export async function disconnectAll(): Promise<void> {
   await Promise.all(
     Array.from(clients.values()).map(async ({ prisma, pool }) => {
