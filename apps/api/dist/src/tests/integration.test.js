@@ -19,6 +19,7 @@ const tokenA = jsonwebtoken_1.default.sign({ id: "user-a", tenantId: tenantA.id,
 const tokenB = jsonwebtoken_1.default.sign({ id: "user-b", tenantId: tenantB.id, email: tenantB.email }, config_1.config.jwtSecret);
 (0, vitest_1.describe)("Integration Tests", () => {
     (0, vitest_1.beforeAll)(async () => {
+        await db.analyticsBucket.deleteMany();
         await db.linkClick.deleteMany();
         await db.link.deleteMany();
     });
@@ -166,6 +167,87 @@ const tokenB = jsonwebtoken_1.default.sign({ id: "user-b", tenantId: tenantB.id,
                 where: { requestId: "unique-request-id" }
             });
             (0, vitest_1.expect)(count).toBe(1);
+        });
+        (0, vitest_1.it)("should aggregate concurrent clicks into one analytics bucket", async () => {
+            const { processClickJob } = await import("../jobs/analytics");
+            const link = await db.link.create({
+                data: {
+                    id: (0, uuid_1.v4)(),
+                    tenantId: "tenant-a",
+                    code: "tenant-a_race",
+                    longUrl: "https://race-test.com",
+                    createdBy: "user-a"
+                }
+            });
+            const timestamp = "2026-01-15T14:23:45.000Z";
+            const jobs = Array.from({ length: 10 }, (_, index) => processClickJob({
+                data: {
+                    linkId: link.id,
+                    requestId: `race-request-${index}`,
+                    ip: "1.2.3.4",
+                    userAgent: "vitest",
+                    timestamp,
+                }
+            }));
+            await Promise.all(jobs);
+            const bucket = await db.analyticsBucket.findUnique({
+                where: {
+                    linkId_timestampBucket: {
+                        linkId: link.id,
+                        timestampBucket: new Date("2026-01-15T14:00:00.000Z"),
+                    },
+                },
+            });
+            const clickCount = await db.linkClick.count({
+                where: { linkId: link.id },
+            });
+            (0, vitest_1.expect)(clickCount).toBe(10);
+            (0, vitest_1.expect)(bucket?.count).toBe(10);
+            (0, vitest_1.expect)(bucket?.lastAccessedAt.toISOString()).toBe(timestamp);
+        });
+        (0, vitest_1.it)("should keep the newest lastAccessedAt under out-of-order concurrency", async () => {
+            const { processClickJob } = await import("../jobs/analytics");
+            const link = await db.link.create({
+                data: {
+                    id: (0, uuid_1.v4)(),
+                    tenantId: "tenant-a",
+                    code: "tenant-a_last-access",
+                    longUrl: "https://last-access-test.com",
+                    createdBy: "user-a"
+                }
+            });
+            const earlyTimestamp = "2026-01-15T14:23:45.000Z";
+            const lateTimestamp = "2026-01-15T14:23:45.900Z";
+            await Promise.all([
+                processClickJob({
+                    data: {
+                        linkId: link.id,
+                        requestId: "last-access-early",
+                        ip: "1.2.3.4",
+                        userAgent: "vitest",
+                        timestamp: earlyTimestamp,
+                    }
+                }),
+                processClickJob({
+                    data: {
+                        linkId: link.id,
+                        requestId: "last-access-late",
+                        ip: "1.2.3.4",
+                        userAgent: "vitest",
+                        timestamp: lateTimestamp,
+                    }
+                }),
+            ]);
+            const bucket = await db.analyticsBucket.findUnique({
+                where: {
+                    linkId_timestampBucket: {
+                        linkId: link.id,
+                        timestampBucket: new Date("2026-01-15T14:00:00.000Z"),
+                    },
+                },
+            });
+            (0, vitest_1.expect)(bucket?.count).toBe(2);
+            (0, vitest_1.expect)(bucket?.lastAccessedAt.toISOString()).toBe(lateTimestamp);
         });
     });
 });

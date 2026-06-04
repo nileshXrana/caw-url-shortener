@@ -5,7 +5,7 @@ import { logger } from "./logger";
 import { cacheService, CachedLink } from "./redis";
 import { analyticsQueue, startAnalyticsWorker } from "./jobs/analytics";
 import { config } from "./config";
-import { getDb } from "./db";
+import { getDb, disconnectAll } from "./db";
 import { createHash } from "crypto";
 import jwt from "jsonwebtoken";
 import { isValidRedirectUrl } from "./url";
@@ -56,13 +56,25 @@ app.use((req: any, res: any, next) => {
 
 const authenticate = (req: any, res: any, next: any) => {
   const authHeader = req.headers.authorization;
-  if (!authHeader?.startsWith("Bearer ")) {
+
+  // Layer 1: strict header format check
+  if (!authHeader || typeof authHeader !== "string" ||
+      !authHeader.startsWith("Bearer ")) {
     return res.status(401).json({ error: "missing_token" });
   }
 
   const token = authHeader.split(" ")[1];
+
+  // Layer 2: reject empty or whitespace-only tokens
+  if (!token || !token.trim()) {
+    return res.status(401).json({ error: "missing_token" });
+  }
+
+  // Layer 3: explicit algorithm whitelist — blocks "none" attack
   try {
-    const decoded = jwt.verify(token, config.jwtSecret) as any;
+    const decoded = jwt.verify(token, config.jwtSecret, {
+      algorithms: ["HS256"],
+    }) as any;
     req.user = decoded;
     next();
   } catch (err) {
@@ -160,6 +172,7 @@ app.post("/links", authenticate, async (req: any, res: any) => {
   const { code, longUrl, expiresAt, tags } = req.body;
   const tenantId = req.user.tenantId;
   const createdBy = req.user.id;
+  const teamIdHeader = req.headers["x-team-id"] as string | undefined;
 
   if (!longUrl || !isValidRedirectUrl(longUrl)) {
     return res.status(400).json({ error: "invalid_url" });
@@ -170,6 +183,7 @@ app.post("/links", authenticate, async (req: any, res: any) => {
     const link = await db.link.create({
       data: {
         tenantId,
+        teamId: teamIdHeader || null,
         code,
         longUrl,
         expiresAt: expiresAt ? new Date(expiresAt) : null,
@@ -187,6 +201,7 @@ app.post("/links", authenticate, async (req: any, res: any) => {
 
 app.get("/links/search", authenticate, async (req: any, res: any) => {
   const tenantId = req.user.tenantId;
+  const teamIdHeader = req.headers["x-team-id"] as string | undefined;
   const q = String(req.query.q || "");
   const tag = req.query.tag; // string or array
   const page = Math.max(1, parseInt(String(req.query.page || "1")));
@@ -199,10 +214,11 @@ app.get("/links/search", authenticate, async (req: any, res: any) => {
   try {
     const where: any = { tenantId };
 
+    if (teamIdHeader) {
+      where.teamId = teamIdHeader;
+    }
+
     if (q) {
-      // Use plainto_tsquery logic: sanitize the input to remove special FTS operators
-      // or replace them with safe versions.
-      // For Prisma, the simplest way is to remove characters that have special meaning in to_tsquery.
       const safeQ = q.replace(/[&|!():*']/g, " ").trim();
       if (safeQ) {
         where.OR = [
@@ -244,15 +260,169 @@ app.get("/links/search", authenticate, async (req: any, res: any) => {
 
 app.get("/links", authenticate, async (req: any, res: any) => {
   const tenantId = req.user.tenantId;
+  const teamIdHeader = req.headers["x-team-id"] as string | undefined;
   const db = getDb(config.databaseUrl);
   try {
+    const where: any = { tenantId };
+    if (teamIdHeader) where.teamId = teamIdHeader;
+
     const links = await db.link.findMany({
-      where: { tenantId },
+      where,
       orderBy: [{ createdAt: "desc" }, { id: "desc" }],
     });
     res.json(links);
   } catch (err) {
     res.status(500).json({ error: "failed_to_fetch_links" });
+  }
+});
+
+// Team Member Management
+app.get("/teams/:id/members", authenticate, async (req: any, res: any) => {
+  const teamId = req.params.id;
+  const db = getDb(config.databaseUrl);
+  try {
+    const members = await db.teamMember.findMany({
+      where: { teamId },
+      select: { userId: true, role: true, joinedAt: true },
+    });
+    res.json(members);
+  } catch (err) {
+    logger.error("failed_to_list_members", err, { teamId });
+    res.status(500).json({ error: "failed_to_list_members" });
+  }
+});
+
+app.delete("/teams/:id/members/:userId", authenticate, async (req: any, res: any) => {
+  const teamId = req.params.id;
+  const targetUserId = req.params.userId;
+  const db = getDb(config.databaseUrl);
+  try {
+    const requesterMembership = await db.teamMember.findUnique({
+      where: { teamId_userId: { teamId, userId: req.user.id } },
+    });
+
+    if (!requesterMembership || requesterMembership.role !== "ADMIN") {
+      return res.status(403).json({ error: "forbidden" });
+    }
+
+    await db.teamMember.delete({
+      where: { teamId_userId: { teamId, userId: targetUserId } },
+    });
+
+    res.status(204).send();
+  } catch (err) {
+    logger.error("failed_to_remove_member", err, { teamId, targetUserId });
+    res.status(500).json({ error: "failed_to_remove_member" });
+  }
+});
+
+// POST /teams/:id/invitations - create invitation token (admin-only)
+app.post("/teams/:id/invitations", authenticate, async (req: any, res: any) => {
+  const teamId = req.params.id;
+  const { email, role, expiresInDays } = req.body;
+  const db = getDb(config.databaseUrl);
+
+  try {
+    const requesterMembership = await db.teamMember.findUnique({
+      where: { teamId_userId: { teamId, userId: req.user.id } },
+    });
+
+    if (!requesterMembership || requesterMembership.role !== "ADMIN") {
+      return res.status(403).json({ error: "forbidden" });
+    }
+
+    const token = uuidv4();
+    const expiresAt = expiresInDays ? new Date(Date.now() + Number(expiresInDays) * 24 * 60 * 60 * 1000) : new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+
+    const inv = await db.invitation.create({
+      data: {
+        token,
+        email,
+        teamId,
+        role: role || "MEMBER",
+        expiresAt,
+      },
+    });
+
+    res.status(201).json({ token: inv.token, expiresAt: inv.expiresAt });
+  } catch (err) {
+    logger.error("failed_to_create_invitation", err, { teamId, email });
+    res.status(500).json({ error: "failed_to_create_invitation" });
+  }
+});
+
+// POST /invitations/accept - accept an invitation (authenticated)
+app.post("/invitations/accept", authenticate, async (req: any, res: any) => {
+  const { token } = req.body;
+  const userId = req.user.id;
+  const db = getDb(config.databaseUrl);
+
+  try {
+    const inv = await db.invitation.findUnique({ where: { token } });
+    if (!inv) return res.status(404).json({ error: "invalid_token" });
+    if (inv.expiresAt && inv.expiresAt.getTime() <= Date.now()) {
+      return res.status(400).json({ error: "token_expired" });
+    }
+
+    // Idempotent create
+    const existing = await db.teamMember.findUnique({ where: { teamId_userId: { teamId: inv.teamId, userId } } });
+    if (existing) {
+      // Remove the invitation and return existing membership
+      await db.invitation.delete({ where: { id: inv.id } });
+      return res.status(200).json(existing);
+    }
+
+    const membership = await db.teamMember.create({
+      data: { teamId: inv.teamId, userId, role: inv.role },
+    });
+
+    await db.invitation.delete({ where: { id: inv.id } });
+
+    res.status(201).json(membership);
+  } catch (err) {
+    logger.error("failed_to_accept_invitation", err, { token });
+    res.status(500).json({ error: "failed_to_accept_invitation" });
+  }
+});
+
+// GET /teams/:id/activity - recent link creations and click summaries
+app.get("/teams/:id/activity", authenticate, async (req: any, res: any) => {
+  const teamId = req.params.id;
+  const db = getDb(config.databaseUrl);
+
+  try {
+    const membership = await db.teamMember.findUnique({ where: { teamId_userId: { teamId, userId: req.user.id } } });
+    if (!membership) return res.status(403).json({ error: "forbidden" });
+
+    // Batched single query replacing N+1 loop
+    const links = await db.link.findMany({
+      where: { teamId },
+      orderBy: { createdAt: "desc" },
+      take: 50,
+      include: {
+        _count: { select: { clicks: true } },
+        clicks: {
+          orderBy: { timestamp: "desc" },
+          take: 1,
+          select: { timestamp: true },
+        },
+      },
+    });
+
+    const summaries = links.map((l: any) => ({
+      type: "link_summary",
+      linkId: l.id,
+      code: l.code,
+      longUrl: l.longUrl,
+      createdAt: l.createdAt,
+      totalClicks: l._count.clicks,
+      lastClick: l.clicks[0]?.timestamp || null,
+    }));
+
+    res.json({ links: summaries });
+  } catch (err) {
+    logger.error("failed_to_fetch_activity", err, { teamId });
+    res.status(500).json({ error: "failed_to_fetch_activity" });
   }
 });
 
@@ -381,9 +551,8 @@ if (require.main === module) {
       server.close(async () => {
         logger.info("HTTP server closed.");
         try {
-          const db = getDb(config.databaseUrl);
-          await db.$disconnect();
-          logger.info("Database connection closed.");
+          await disconnectAll();
+          logger.info("Database connections closed.");
           process.exit(0);
         } catch (err) {
           logger.error("Error during shutdown", err);
@@ -408,7 +577,6 @@ if (require.main === module) {
     
     process.on("SIGTERM", () => {
       logger.info("Worker received SIGTERM. Shutting down...");
-      // BullMQ handles shutdown gracefully if we don't force exit
       setTimeout(() => process.exit(0), 5000);
     });
   }

@@ -8,6 +8,7 @@ export function normalizeLongUrl(input: string): string {
 
 export function isValidRedirectUrl(url: string): boolean {
   if (!url) return false;
+  if (url.length > 2048) return false; // reject before any parsing
 
   let parsed: URL;
   try {

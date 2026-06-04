@@ -15,7 +15,7 @@ const redact = (data) => {
         if (isSensitiveValue(data)) {
             return "[REDACTED]";
         }
-        return data;
+        return data.replace(/[\r\n\t]+/g, " ");
     }
     if (typeof data === "object" && data !== null) {
         if (Array.isArray(data)) {
@@ -36,8 +36,13 @@ const redact = (data) => {
     return data;
 };
 exports.redact = redact;
+const LEVELS = { error: 0, warn: 1, info: 2, debug: 3 };
+const configuredLevel = (process.env.LOG_LEVEL || "info").toLowerCase();
+const currentLevelPriority = LEVELS[configuredLevel] ?? LEVELS.info;
 exports.logger = {
     info: (message, context) => {
+        if (currentLevelPriority < LEVELS.info)
+            return;
         try {
             const logObj = {
                 level: "info",
@@ -53,6 +58,8 @@ exports.logger = {
         }
     },
     warn: (message, context) => {
+        if (currentLevelPriority < LEVELS.warn)
+            return;
         try {
             const logObj = {
                 level: "warn",
@@ -68,6 +75,8 @@ exports.logger = {
         }
     },
     error: (message, error, context) => {
+        if (currentLevelPriority < LEVELS.error)
+            return;
         try {
             const logObj = {
                 level: "error",

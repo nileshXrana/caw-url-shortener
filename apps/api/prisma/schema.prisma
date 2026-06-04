@@ -10,6 +10,8 @@ datasource db {
 model Link {
   id        String   @id @default(cuid())
   tenantId  String
+  teamId    String?
+  team      Team?    @relation(fields: [teamId], references: [id])
   code      String
   longUrl   String
   createdAt DateTime @default(now())
@@ -18,10 +20,12 @@ model Link {
   tags      String[] @default([])
 
   clicks   LinkClick[]
+  analytics AnalyticsBucket[]
   comments Comment[]
 
   @@unique([tenantId, code])
   @@index([createdBy])
+  @@index([teamId])
 }
 
 model LinkClick {
@@ -38,6 +42,18 @@ model LinkClick {
   @@index([timestamp])
 }
 
+model AnalyticsBucket {
+  id              String   @id @default(cuid())
+  linkId          String
+  link            Link     @relation(fields: [linkId], references: [id], onDelete: Cascade)
+  timestampBucket DateTime
+  count           Int      @default(0)
+  lastAccessedAt  DateTime @default(now())
+
+  @@unique([linkId, timestampBucket])
+  @@index([timestampBucket])
+}
+
 model Team {
   id        String   @id @default(cuid())
   name      String
@@ -45,6 +61,9 @@ model Team {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   members   TeamMember[]
+  links     Link[]
+  invitations Invitation[]
+  activityEvents ActivityEvent[]
 }
 
 enum TeamRole {
@@ -66,12 +85,27 @@ model TeamMember {
 model ActivityEvent {
   id        String   @id @default(cuid())
   teamId    String
+  team      Team     @relation(fields: [teamId], references: [id])
   userId    String
   type      String
   metadata  Json?
   createdAt DateTime @default(now())
 
   @@index([teamId, createdAt])
+}
+
+model Invitation {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  email     String
+  teamId    String
+  role      TeamRole @default(MEMBER)
+  expiresAt DateTime?
+  createdAt DateTime @default(now())
+
+  team Team @relation(fields: [teamId], references: [id])
+
+  @@index([teamId])
 }
 
 model Comment {

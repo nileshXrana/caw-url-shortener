@@ -25,21 +25,40 @@ const hashIp = (ip: string) => {
   return createHash("sha256").update(ip).digest("hex");
 };
 
+const getTimestampBucket = (timestamp: string) => {
+  const bucket = new Date(timestamp);
+  bucket.setUTCMinutes(0, 0, 0);
+  return bucket;
+};
+
 export const processClickJob = async (job: { data: ClickJobData }) => {
   const { linkId, requestId, ip, userAgent, referer, timestamp } = job.data;
   const db = getDb(config.databaseUrl);
   const ipHash = hashIp(ip);
+  const timestampBucket = getTimestampBucket(timestamp);
+  const clickedAt = new Date(timestamp);
 
   try {
-    await db.linkClick.create({
-      data: {
-        linkId,
-        requestId,
-        ipHash,
-        userAgent,
-        referer,
-        timestamp: new Date(timestamp),
-      },
+    await db.$transaction(async (transaction) => {
+      await transaction.linkClick.create({
+        data: {
+          linkId,
+          requestId,
+          ipHash,
+          userAgent,
+          referer,
+          timestamp: clickedAt,
+        },
+      });
+
+      await transaction.$executeRaw`
+        INSERT INTO "AnalyticsBucket" ("id", "linkId", "timestampBucket", "count", "lastAccessedAt")
+        VALUES (${crypto.randomUUID()}, ${linkId}, ${timestampBucket}, 1, ${clickedAt})
+        ON CONFLICT ("linkId", "timestampBucket")
+        DO UPDATE SET
+          "count" = "AnalyticsBucket"."count" + 1,
+          "lastAccessedAt" = GREATEST("AnalyticsBucket"."lastAccessedAt", EXCLUDED."lastAccessedAt")
+      `;
     });
     logger.info("Recorded click", { linkId, requestId });
   } catch (err: any) {

@@ -139,6 +139,7 @@ app.post("/links", authenticate, async (req, res) => {
     const { code, longUrl, expiresAt, tags } = req.body;
     const tenantId = req.user.tenantId;
     const createdBy = req.user.id;
+    const teamIdHeader = req.headers["x-team-id"];
     if (!longUrl || !(0, url_1.isValidRedirectUrl)(longUrl)) {
         return res.status(400).json({ error: "invalid_url" });
     }
@@ -147,9 +148,11 @@ app.post("/links", authenticate, async (req, res) => {
         const link = await db.link.create({
             data: {
                 tenantId,
+                teamId: teamIdHeader || null,
                 code,
                 longUrl,
                 expiresAt: expiresAt ? new Date(expiresAt) : null,
+                createdAt: new Date(),
                 tags: tags || [],
                 createdBy,
             },
@@ -163,6 +166,7 @@ app.post("/links", authenticate, async (req, res) => {
 });
 app.get("/links/search", authenticate, async (req, res) => {
     const tenantId = req.user.tenantId;
+    const teamIdHeader = req.headers["x-team-id"];
     const q = String(req.query.q || "");
     const tag = req.query.tag;
     const page = Math.max(1, parseInt(String(req.query.page || "1")));
@@ -172,6 +176,9 @@ app.get("/links/search", authenticate, async (req, res) => {
     const db = (0, db_1.getDb)(config_1.config.databaseUrl);
     try {
         const where = { tenantId };
+        if (teamIdHeader) {
+            where.teamId = teamIdHeader;
+        }
         if (q) {
             const safeQ = q.replace(/[&|!():*']/g, " ").trim();
             if (safeQ) {
@@ -190,7 +197,7 @@ app.get("/links/search", authenticate, async (req, res) => {
                 where,
                 skip,
                 take,
-                orderBy: { createdAt: "desc" },
+                orderBy: [{ createdAt: "desc" }, { id: "desc" }],
             }),
             db.link.count({ where }),
         ]);
@@ -211,16 +218,140 @@ app.get("/links/search", authenticate, async (req, res) => {
 });
 app.get("/links", authenticate, async (req, res) => {
     const tenantId = req.user.tenantId;
+    const teamIdHeader = req.headers["x-team-id"];
     const db = (0, db_1.getDb)(config_1.config.databaseUrl);
     try {
+        const where = { tenantId };
+        if (teamIdHeader)
+            where.teamId = teamIdHeader;
         const links = await db.link.findMany({
-            where: { tenantId },
-            orderBy: { createdAt: "desc" },
+            where,
+            orderBy: [{ createdAt: "desc" }, { id: "desc" }],
         });
         res.json(links);
     }
     catch (err) {
         res.status(500).json({ error: "failed_to_fetch_links" });
+    }
+});
+app.get("/teams/:id/members", authenticate, async (req, res) => {
+    const teamId = req.params.id;
+    const db = (0, db_1.getDb)(config_1.config.databaseUrl);
+    try {
+        const members = await db.teamMember.findMany({
+            where: { teamId },
+            select: { userId: true, role: true, joinedAt: true },
+        });
+        res.json(members);
+    }
+    catch (err) {
+        logger_1.logger.error("failed_to_list_members", err, { teamId });
+        res.status(500).json({ error: "failed_to_list_members" });
+    }
+});
+app.delete("/teams/:id/members/:userId", authenticate, async (req, res) => {
+    const teamId = req.params.id;
+    const targetUserId = req.params.userId;
+    const db = (0, db_1.getDb)(config_1.config.databaseUrl);
+    try {
+        const requesterMembership = await db.teamMember.findUnique({
+            where: { teamId_userId: { teamId, userId: req.user.id } },
+        });
+        if (!requesterMembership || requesterMembership.role !== "ADMIN") {
+            return res.status(403).json({ error: "forbidden" });
+        }
+        await db.teamMember.delete({
+            where: { teamId_userId: { teamId, userId: targetUserId } },
+        });
+        res.status(204).send();
+    }
+    catch (err) {
+        logger_1.logger.error("failed_to_remove_member", err, { teamId, targetUserId });
+        res.status(500).json({ error: "failed_to_remove_member" });
+    }
+});
+app.post("/teams/:id/invitations", authenticate, async (req, res) => {
+    const teamId = req.params.id;
+    const { email, role, expiresInDays } = req.body;
+    const db = (0, db_1.getDb)(config_1.config.databaseUrl);
+    try {
+        const requesterMembership = await db.teamMember.findUnique({
+            where: { teamId_userId: { teamId, userId: req.user.id } },
+        });
+        if (!requesterMembership || requesterMembership.role !== "ADMIN") {
+            return res.status(403).json({ error: "forbidden" });
+        }
+        const token = (0, uuid_1.v4)();
+        const expiresAt = expiresInDays ? new Date(Date.now() + Number(expiresInDays) * 24 * 60 * 60 * 1000) : new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+        const inv = await db.invitation.create({
+            data: {
+                token,
+                email,
+                teamId,
+                role: role || "MEMBER",
+                expiresAt,
+            },
+        });
+        res.status(201).json({ token: inv.token, expiresAt: inv.expiresAt });
+    }
+    catch (err) {
+        logger_1.logger.error("failed_to_create_invitation", err, { teamId, email });
+        res.status(500).json({ error: "failed_to_create_invitation" });
+    }
+});
+app.post("/invitations/accept", authenticate, async (req, res) => {
+    const { token } = req.body;
+    const userId = req.user.id;
+    const db = (0, db_1.getDb)(config_1.config.databaseUrl);
+    try {
+        const inv = await db.invitation.findUnique({ where: { token } });
+        if (!inv)
+            return res.status(404).json({ error: "invalid_token" });
+        if (inv.expiresAt && inv.expiresAt.getTime() <= Date.now()) {
+            return res.status(400).json({ error: "token_expired" });
+        }
+        const existing = await db.teamMember.findUnique({ where: { teamId_userId: { teamId: inv.teamId, userId } } });
+        if (existing) {
+            await db.invitation.delete({ where: { id: inv.id } });
+            return res.status(200).json(existing);
+        }
+        const membership = await db.teamMember.create({
+            data: { teamId: inv.teamId, userId, role: inv.role },
+        });
+        await db.invitation.delete({ where: { id: inv.id } });
+        res.status(201).json(membership);
+    }
+    catch (err) {
+        logger_1.logger.error("failed_to_accept_invitation", err, { token });
+        res.status(500).json({ error: "failed_to_accept_invitation" });
+    }
+});
+app.get("/teams/:id/activity", authenticate, async (req, res) => {
+    const teamId = req.params.id;
+    const db = (0, db_1.getDb)(config_1.config.databaseUrl);
+    try {
+        const membership = await db.teamMember.findUnique({ where: { teamId_userId: { teamId, userId: req.user.id } } });
+        if (!membership)
+            return res.status(403).json({ error: "forbidden" });
+        const links = await db.link.findMany({ where: { teamId }, orderBy: { createdAt: "desc" }, take: 50 });
+        const summaries = await Promise.all(links.map(async (l) => {
+            const count = await db.linkClick.count({ where: { linkId: l.id } });
+            const last = await db.linkClick.findFirst({ where: { linkId: l.id }, orderBy: { timestamp: "desc" }, select: { timestamp: true } });
+            return {
+                type: "link_summary",
+                linkId: l.id,
+                code: l.code,
+                longUrl: l.longUrl,
+                createdAt: l.createdAt,
+                totalClicks: count,
+                lastClick: last?.timestamp || null,
+            };
+        }));
+        res.json({ links: summaries });
+    }
+    catch (err) {
+        logger_1.logger.error("failed_to_fetch_activity", err, { teamId });
+        res.status(500).json({ error: "failed_to_fetch_activity" });
     }
 });
 app.patch("/links/:id", authenticate, async (req, res) => {
