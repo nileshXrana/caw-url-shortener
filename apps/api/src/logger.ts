@@ -23,7 +23,8 @@ export const redact = (data: any): any => {
     if (isSensitiveValue(data)) {
       return "[REDACTED]";
     }
-    return data;
+    // Sanitize control characters and newlines to avoid log injection
+    return data.replace(/[\r\n\t]+/g, " ");
   }
 
   if (typeof data === "object" && data !== null) {
@@ -45,8 +46,13 @@ export const redact = (data: any): any => {
   return data;
 };
 
+const LEVELS: Record<string, number> = { error: 0, warn: 1, info: 2, debug: 3 };
+const configuredLevel = (process.env.LOG_LEVEL || "info").toLowerCase();
+const currentLevelPriority = LEVELS[configuredLevel] ?? LEVELS.info;
+
 export const logger = {
   info: (message: string, context?: LogContext) => {
+    if (currentLevelPriority < LEVELS.info) return;
     try {
       const logObj = {
         level: "info",
@@ -61,6 +67,7 @@ export const logger = {
     }
   },
   warn: (message: string, context?: LogContext) => {
+    if (currentLevelPriority < LEVELS.warn) return;
     try {
       const logObj = {
         level: "warn",
@@ -75,6 +82,7 @@ export const logger = {
     }
   },
   error: (message: string, error?: any, context?: LogContext) => {
+    if (currentLevelPriority < LEVELS.error) return;
     try {
       const logObj = {
         level: "error",
@@ -83,7 +91,7 @@ export const logger = {
         error: error instanceof Error ? {
           name: error.name,
           message: error.message,
-          stack: error.stack, 
+          stack: error.stack,
         } : String(error),
         ...redact(context),
       };

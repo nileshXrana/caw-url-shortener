@@ -173,6 +173,7 @@ app.post("/links", authenticate, async (req: any, res: any) => {
         code,
         longUrl,
         expiresAt: expiresAt ? new Date(expiresAt) : null,
+        createdAt: new Date(),
         tags: tags || [],
         createdBy,
       },
@@ -221,7 +222,7 @@ app.get("/links/search", authenticate, async (req: any, res: any) => {
         where,
         skip,
         take,
-        orderBy: { createdAt: "desc" },
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
       }),
       db.link.count({ where }),
     ]);
@@ -247,7 +248,7 @@ app.get("/links", authenticate, async (req: any, res: any) => {
   try {
     const links = await db.link.findMany({
       where: { tenantId },
-      orderBy: { createdAt: "desc" },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
     });
     res.json(links);
   } catch (err) {
