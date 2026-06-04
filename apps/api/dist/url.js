@@ -12,6 +12,8 @@ function normalizeLongUrl(input) {
 function isValidRedirectUrl(url) {
     if (!url)
         return false;
+    if (url.length > 2048)
+        return false;
     let parsed;
     try {
         parsed = new URL(url);

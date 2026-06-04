@@ -6,12 +6,22 @@ const config_1 = require("../config");
 const logger_1 = require("../logger");
 const db_1 = require("../db");
 const crypto_1 = require("crypto");
+const redis_1 = require("../redis");
 const REDIS_OPTIONS = {
     connection: {
         url: config_1.config.redisUrl,
     },
 };
-exports.analyticsQueue = new bullmq_1.Queue("analytics", REDIS_OPTIONS);
+exports.analyticsQueue = new bullmq_1.Queue("analytics", {
+    ...REDIS_OPTIONS,
+    defaultJobOptions: {
+        attempts: 3,
+        backoff: {
+            type: "exponential",
+            delay: 1000,
+        },
+    },
+});
 const hashIp = (ip) => {
     return (0, crypto_1.createHash)("sha256").update(ip).digest("hex");
 };
@@ -21,8 +31,16 @@ const getTimestampBucket = (timestamp) => {
     return bucket;
 };
 const processClickJob = async (job) => {
+    const jobId = job.id;
+    if (jobId) {
+        const isProcessed = await redis_1.cacheService.isJobProcessed(jobId);
+        if (isProcessed) {
+            logger_1.logger.warn("Duplicate job execution prevented via Redis dedup namespace", { jobId });
+            return;
+        }
+    }
     const { linkId, requestId, ip, userAgent, referer, timestamp } = job.data;
-    const db = (0, db_1.getDb)(config_1.config.databaseUrl);
+    const db = (0, db_1.getDb)(config_1.config.databaseUrl, 3);
     const ipHash = hashIp(ip);
     const timestampBucket = getTimestampBucket(timestamp);
     const clickedAt = new Date(timestamp);
@@ -47,6 +65,9 @@ const processClickJob = async (job) => {
           "lastAccessedAt" = GREATEST("AnalyticsBucket"."lastAccessedAt", EXCLUDED."lastAccessedAt")
       `;
         });
+        if (jobId) {
+            await redis_1.cacheService.markJobProcessed(jobId);
+        }
         logger_1.logger.info("Recorded click", { linkId, requestId });
     }
     catch (err) {

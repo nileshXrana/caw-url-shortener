@@ -9,6 +9,7 @@ export interface ClickJobData {
     timestamp: string;
 }
 export declare const processClickJob: (job: {
+    id?: string;
     data: ClickJobData;
 }) => Promise<void>;
 export declare const startAnalyticsWorker: () => Worker<ClickJobData, void, string>;

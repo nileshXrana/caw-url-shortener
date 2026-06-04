@@ -6,6 +6,7 @@ import { config } from "../config";
 import jwt from "jsonwebtoken";
 import { purgeOldAnalytics } from "../purge";
 import { v4 as uuidv4 } from "uuid";
+import { redis } from "../redis";
 
 const TEST_DB_URL = "postgresql://postgres:postgres@localhost:5432/bootcamp_test?schema=public";
 const db = getDb(TEST_DB_URL);
@@ -23,6 +24,7 @@ describe("Integration Tests", () => {
     await db.analyticsBucket.deleteMany();
     await db.linkClick.deleteMany();
     await db.link.deleteMany();
+    await redis.flushdb();
   });
 
   afterAll(async () => {

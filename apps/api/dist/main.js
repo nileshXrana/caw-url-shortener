@@ -51,12 +51,18 @@ app.use((req, res, next) => {
 });
 const authenticate = (req, res, next) => {
     const authHeader = req.headers.authorization;
-    if (!authHeader?.startsWith("Bearer ")) {
+    if (!authHeader || typeof authHeader !== "string" ||
+        !authHeader.startsWith("Bearer ")) {
         return res.status(401).json({ error: "missing_token" });
     }
     const token = authHeader.split(" ")[1];
+    if (!token || !token.trim()) {
+        return res.status(401).json({ error: "missing_token" });
+    }
     try {
-        const decoded = jsonwebtoken_1.default.verify(token, config_1.config.jwtSecret);
+        const decoded = jsonwebtoken_1.default.verify(token, config_1.config.jwtSecret, {
+            algorithms: ["HS256"],
+        });
         req.user = decoded;
         next();
     }
@@ -333,19 +339,27 @@ app.get("/teams/:id/activity", authenticate, async (req, res) => {
         const membership = await db.teamMember.findUnique({ where: { teamId_userId: { teamId, userId: req.user.id } } });
         if (!membership)
             return res.status(403).json({ error: "forbidden" });
-        const links = await db.link.findMany({ where: { teamId }, orderBy: { createdAt: "desc" }, take: 50 });
-        const summaries = await Promise.all(links.map(async (l) => {
-            const count = await db.linkClick.count({ where: { linkId: l.id } });
-            const last = await db.linkClick.findFirst({ where: { linkId: l.id }, orderBy: { timestamp: "desc" }, select: { timestamp: true } });
-            return {
-                type: "link_summary",
-                linkId: l.id,
-                code: l.code,
-                longUrl: l.longUrl,
-                createdAt: l.createdAt,
-                totalClicks: count,
-                lastClick: last?.timestamp || null,
-            };
+        const links = await db.link.findMany({
+            where: { teamId },
+            orderBy: { createdAt: "desc" },
+            take: 50,
+            include: {
+                _count: { select: { clicks: true } },
+                clicks: {
+                    orderBy: { timestamp: "desc" },
+                    take: 1,
+                    select: { timestamp: true },
+                },
+            },
+        });
+        const summaries = links.map((l) => ({
+            type: "link_summary",
+            linkId: l.id,
+            code: l.code,
+            longUrl: l.longUrl,
+            createdAt: l.createdAt,
+            totalClicks: l._count.clicks,
+            lastClick: l.clicks[0]?.timestamp || null,
         }));
         res.json({ links: summaries });
     }
@@ -463,9 +477,8 @@ if (require.main === module) {
             server.close(async () => {
                 logger_1.logger.info("HTTP server closed.");
                 try {
-                    const db = (0, db_1.getDb)(config_1.config.databaseUrl);
-                    await db.$disconnect();
-                    logger_1.logger.info("Database connection closed.");
+                    await (0, db_1.disconnectAll)();
+                    logger_1.logger.info("Database connections closed.");
                     process.exit(0);
                 }
                 catch (err) {
