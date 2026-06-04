@@ -1,43 +1,49 @@
-# --- Build Stage ---
-FROM node:20 AS builder
+# ────────────────────────────────────────────────────────────
+# Stage 1 – Builder
+# Copy everything (including host node_modules) and compile
+# ────────────────────────────────────────────────────────────
+FROM node:22-slim AS builder
 
 WORKDIR /app
 
-# Copy manifest files
-COPY package*.json ./
-COPY prisma ./prisma/
-
-# Install all dependencies
-RUN npm ci
-
-# Debug: check contents
-RUN cat package.json
-RUN ls -la node_modules/.bin || echo "bin not found"
-RUN ls -la node_modules/.bin/prisma || echo "prisma not found"
-
-# Copy source code
+# Copy all files (including pre-installed node_modules since no internet in container)
 COPY . .
 
-# Build the application (runs prebuild: prisma generate)
-RUN npm run build
+# Compile TypeScript
+RUN node_modules/.bin/tsc -p tsconfig.build.json
 
-# --- Production Stage ---
-FROM node:20 AS runner
+# Prune devDependencies offline to keep image small
+RUN npm prune --omit=dev --offline
+
+# ────────────────────────────────────────────────────────────
+# Stage 2 – Runner (production image)
+# Only compiled output + pruned node_modules land here
+# ────────────────────────────────────────────────────────────
+FROM node:22-slim AS runner
 
 WORKDIR /app
 
-# Copy production dependencies from builder
+# Security: create and switch to a non-root user
+RUN groupadd --system appgroup && \
+    useradd --system --gid appgroup --no-create-home appuser
+
+# Copy only what is needed to run
 COPY --from=builder /app/package*.json ./
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/prisma ./prisma
 
-# Set production environment
+# Runtime environment
 ENV NODE_ENV=production
 ENV PORT=3000
 
-# Expose the configured port
+# Drop privileges
+USER appuser
+
 EXPOSE 3000
 
-# Start command
+# Container health-check (hits the /health endpoint every 30 s)
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD node -e "require('http').get('http://localhost:3000/health', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"
+
 CMD ["node", "dist/main.js"]

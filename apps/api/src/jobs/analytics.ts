@@ -11,7 +11,16 @@ const REDIS_OPTIONS = {
   },
 };
 
-export const analyticsQueue = new Queue("analytics", REDIS_OPTIONS);
+export const analyticsQueue = new Queue("analytics", {
+  ...REDIS_OPTIONS,
+  defaultJobOptions: {
+    attempts: 3,
+    backoff: {
+      type: "exponential",
+      delay: 1000,
+    },
+  },
+});
 
 export interface ClickJobData {
   linkId: string;
@@ -94,13 +103,6 @@ export const startAnalyticsWorker = () => {
     {
       ...REDIS_OPTIONS,
       concurrency: 5,
-      defaultJobOptions: {
-        attempts: 3,
-        backoff: {
-          type: "exponential",
-          delay: 1000,
-        },
-      },
     }
   );
 
