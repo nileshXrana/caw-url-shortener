@@ -1,0 +1,9 @@
+{
+  "summary": "Completed the FIX step. Revised Ticket 2 to close the identified unstated assumptions by adding a 409 Conflict status and unique constraint for idempotency, backend-mocked authorization to prevent client-side impersonation, and strict UUID validation checks at the controller entry gate.",
+  "evidence": [
+    "Overwrote progress/decomposition/artifacts/tickets/module-05/ticket-02-create-booking-api.md with the updated ticket contract including 409 Conflict, mock-consumer-uuid authorization, and UUID validation constraints."
+  ],
+  "artifacts": [
+    "progress/decomposition/artifacts/tickets/module-05/ticket-02-create-booking-api.md"
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "summary": "Decomposed the vertical slices into 5 structured developer tickets containing precise details for title, context, scope, interface contracts, acceptance criteria, constraints, and anti-scope. Tickets 2 and 5 are written to the prescriptive, AI-ready bar using Given/When/Then acceptance criteria.",
+  "evidence": [
+    "Created all 5 tickets and the index file under progress/decomposition/artifacts/tickets/module-05/ in the workspace."
+  ],
+  "artifacts": [
+    "progress/decomposition/artifacts/tickets/module-05/ticket-01-gallery-ui.md",
+    "progress/decomposition/artifacts/tickets/module-05/ticket-02-create-booking-api.md",
+    "progress/decomposition/artifacts/tickets/module-05/ticket-03-schema-setup.md",
+    "progress/decomposition/artifacts/tickets/module-05/ticket-04-payment-ui.md",
+    "progress/decomposition/artifacts/tickets/module-05/ticket-05-stripe-handler-api.md",
+    "progress/decomposition/artifacts/tickets/module-05/ticket-index.md"
+  ]
+}

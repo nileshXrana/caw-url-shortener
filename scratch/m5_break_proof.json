@@ -1,0 +1,7 @@
+{
+  "summary": "Completed the BREAK step. Analyzed 4 common AI agent failure modes where code was technically correct under the spec but production-dangerous. Correctly identified authentication, leaked stack traces, and logging as cross-cutting concerns that should be defined in a shared standards document, and evaluated their scope impact.",
+  "evidence": [
+    "Analyzed the missing details, concern type, and scope impact for Problem A (Authentication), Problem B (Unhandled Stack Traces), and Problem C (Logging) in the conversation."
+  ],
+  "artifacts": []
+}
