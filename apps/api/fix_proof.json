@@ -1,0 +1,12 @@
+{
+  "summary": "Resolved Scenario A configuration drift by updating all database container references in docs/service-overview.md to linkops-db-postgres, starting the database, and verifying recovery.",
+  "evidence": [
+    "Identified container name drift from linkops-postgres to linkops-db-postgres.",
+    "Started stopped postgres container with command docker start linkops-db-postgres.",
+    "Updated docs/service-overview.md to correct all outdated container name references.",
+    "Confirmed curl http://localhost:3000/ready returns READY."
+  ],
+  "artifacts": [
+    "docs/service-overview.md"
+  ]
+}

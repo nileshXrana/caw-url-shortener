@@ -428,4 +428,61 @@ describe("Integration Tests", () => {
       expect(clickCount2).toBe(0);
     });
   });
+
+  describe("Observability & Instrumentation", () => {
+    it("should generate X-Request-ID if not provided and pass it back in the header", async () => {
+      const res = await request(app).get("/live");
+      expect(res.status).toBe(200);
+      expect(res.headers["x-request-id"]).toBeDefined();
+      expect(typeof res.headers["x-request-id"]).toBe("string");
+    });
+
+    it("should preserve incoming X-Request-ID and propagate it", async () => {
+      const customReqId = "custom-uuid-123456";
+      const res = await request(app)
+        .get("/live")
+        .set("X-Request-ID", customReqId);
+      expect(res.status).toBe(200);
+      expect(res.headers["x-request-id"]).toBe(customReqId);
+    });
+
+    it("should expose /metrics with Prometheus formatted text", async () => {
+      const res = await request(app).get("/metrics");
+      expect(res.status).toBe(200);
+      expect(res.headers["content-type"]).toContain("text/plain");
+      expect(res.text).toContain("http_requests_total");
+      expect(res.text).toContain("http_request_duration_seconds");
+      expect(res.text).toContain("active_requests");
+    });
+
+    it("should track request duration and count metrics", async () => {
+      // Hit /live multiple times
+      for (let i = 0; i < 5; i++) {
+        await request(app).get("/live");
+      }
+
+      const res = await request(app).get("/metrics");
+      expect(res.status).toBe(200);
+      
+      // Look for the count of GET /live requests
+      const match = res.text.match(/http_requests_total\{method="GET",path="\/live",status="200"\}\s+(\d+)/);
+      expect(match).not.toBeNull();
+      const count = parseInt(match![1], 10);
+      expect(count).toBeGreaterThanOrEqual(5);
+    });
+
+    it("should handle error gracefully and increment 500 metric", async () => {
+      const res = await request(app).get("/error-test");
+      expect(res.status).toBe(500);
+      expect(res.body.error).toBe("internal_error");
+      expect(res.body.details).toBe("Triggered test 500 error");
+      expect(res.body.stack).toBeDefined();
+
+      const metricsRes = await request(app).get("/metrics");
+      const match = metricsRes.text.match(/http_requests_total\{method="GET",path="\/error-test",status="500"\}\s+(\d+)/);
+      expect(match).not.toBeNull();
+      const count = parseInt(match![1], 10);
+      expect(count).toBeGreaterThanOrEqual(1);
+    });
+  });
 });

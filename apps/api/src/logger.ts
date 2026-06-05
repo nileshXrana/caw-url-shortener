@@ -1,4 +1,6 @@
-import { v4 as uuidv4 } from "uuid";
+import pino from "pino";
+import { config } from "./config";
+import { AsyncLocalStorage } from "async_hooks";
 
 export interface LogContext {
   requestId?: string;
@@ -8,6 +10,31 @@ export interface LogContext {
   latencyMs?: number;
   [key: string]: any;
 }
+
+export const asyncLocalStorage = new AsyncLocalStorage<{ requestId: string }>();
+
+const isDev = config.env === "development";
+
+const pinoLogger = pino({
+  level: config.logLevel.toLowerCase(),
+  timestamp: pino.stdTimeFunctions.isoTime,
+  formatters: {
+    level: (label) => ({ level: label }),
+  },
+  base: {
+    service_name: "url-shortener",
+  },
+  ...(isDev ? {
+    transport: {
+      target: "pino-pretty",
+      options: {
+        colorize: true,
+        translateTime: "UTC:yyyy-mm-dd'T'HH:MM:ss'Z'",
+        ignore: "pid,hostname",
+      },
+    },
+  } : {}),
+});
 
 export const redact = (data: any): any => {
   if (!data) return data;
@@ -23,7 +50,6 @@ export const redact = (data: any): any => {
     if (isSensitiveValue(data)) {
       return "[REDACTED]";
     }
-    // Sanitize control characters and newlines to avoid log injection
     return data.replace(/[\r\n\t]+/g, " ");
   }
 
@@ -46,59 +72,51 @@ export const redact = (data: any): any => {
   return data;
 };
 
-const LEVELS: Record<string, number> = { error: 0, warn: 1, info: 2, debug: 3 };
-const configuredLevel = (process.env.LOG_LEVEL || "info").toLowerCase();
-const currentLevelPriority = LEVELS[configuredLevel] ?? LEVELS.info;
-
 export const logger = {
   info: (message: string, context?: LogContext) => {
-    if (currentLevelPriority < LEVELS.info) return;
-    try {
-      const logObj = {
-        level: "info",
-        timestamp: new Date().toISOString(),
-        message: redact(message),
-        ...redact(context),
-      };
-      const logLine = JSON.stringify(logObj) + "\n";
-      process.stdout.write(logLine);
-    } catch (e) {
-      process.stdout.write(`{"level":"error","message":"failed_to_log_info","error":"${String(e)}"}\n`);
-    }
+    const store = asyncLocalStorage.getStore();
+    const requestId = store?.requestId || context?.requestId || context?.request_id;
+    
+    const cleanContext = { ...context };
+    if (cleanContext.requestId) delete cleanContext.requestId;
+    if (cleanContext.request_id) delete cleanContext.request_id;
+
+    pinoLogger.info({
+      request_id: requestId,
+      ...redact(cleanContext),
+    }, redact(message));
   },
   warn: (message: string, context?: LogContext) => {
-    if (currentLevelPriority < LEVELS.warn) return;
-    try {
-      const logObj = {
-        level: "warn",
-        timestamp: new Date().toISOString(),
-        message: redact(message),
-        ...redact(context),
-      };
-      const logLine = JSON.stringify(logObj) + "\n";
-      process.stdout.write(logLine);
-    } catch (e) {
-      process.stdout.write(`{"level":"error","message":"failed_to_log_warn","error":"${String(e)}"}\n`);
-    }
+    const store = asyncLocalStorage.getStore();
+    const requestId = store?.requestId || context?.requestId || context?.request_id;
+
+    const cleanContext = { ...context };
+    if (cleanContext.requestId) delete cleanContext.requestId;
+    if (cleanContext.request_id) delete cleanContext.request_id;
+
+    pinoLogger.warn({
+      request_id: requestId,
+      ...redact(cleanContext),
+    }, redact(message));
   },
   error: (message: string, error?: any, context?: LogContext) => {
-    if (currentLevelPriority < LEVELS.error) return;
-    try {
-      const logObj = {
-        level: "error",
-        timestamp: new Date().toISOString(),
-        message: redact(message),
-        error: error instanceof Error ? {
-          name: error.name,
-          message: error.message,
-          stack: error.stack,
-        } : String(error),
-        ...redact(context),
-      };
-      const logLine = JSON.stringify(logObj) + "\n";
-      process.stderr.write(logLine);
-    } catch (e) {
-      process.stderr.write(`{"level":"error","message":"failed_to_log_error","error":"serialization_failed"}\n`);
-    }
+    const store = asyncLocalStorage.getStore();
+    const requestId = store?.requestId || context?.requestId || context?.request_id;
+
+    const cleanContext = { ...context };
+    if (cleanContext.requestId) delete cleanContext.requestId;
+    if (cleanContext.request_id) delete cleanContext.request_id;
+
+    const errObj = error instanceof Error ? {
+      name: error.name,
+      message: error.message,
+      stack: error.stack,
+    } : error;
+
+    pinoLogger.error({
+      request_id: requestId,
+      error: redact(errObj),
+      ...redact(cleanContext),
+    }, redact(message));
   },
 };

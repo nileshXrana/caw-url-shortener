@@ -1,21 +1,120 @@
+import { config } from "./config";
 import express from "express";
+import cors from "cors";
 import { PrismaClient } from "@prisma/client";
 import { v4 as uuidv4 } from "uuid";
-import { logger } from "./logger";
+import { logger, asyncLocalStorage } from "./logger";
 import { cacheService, CachedLink } from "./redis";
 import { analyticsQueue, startAnalyticsWorker } from "./jobs/analytics";
-import { config } from "./config";
 import { getDb, disconnectAll } from "./db";
 import { createHash } from "crypto";
 import jwt from "jsonwebtoken";
 import { isValidRedirectUrl } from "./url";
 import { Redis } from "ioredis";
+import { executeResilientDb } from "./resilience";
+import { register, httpRequestsTotal, httpRequestDurationSeconds, activeRequests } from "./metrics";
+
+function isDatabaseConnectionError(err: any): boolean {
+  if (!err) return false;
+  const msg = String(err.message || "");
+  const code = String(err.code || "");
+  const name = String(err.name || "");
+  
+  return (
+    name.includes("PrismaClientInitializationError") ||
+    (name.includes("PrismaClientKnownRequestError") && (
+      code === "P1001" || 
+      code === "P1008" || 
+      msg.includes("Can't reach database server")
+    )) ||
+    msg.includes("ENOTFOUND") ||
+    msg.includes("getaddrinfo") ||
+    msg.includes("ECONNREFUSED") ||
+    msg.includes("Circuit breaker open") // Catch circuit breaker trips
+  );
+}
+
+function handleRouteError(res: any, err: any, logMessage: string, logMetadata: any = {}) {
+  if (isDatabaseConnectionError(err)) {
+    logger.error(`${logMessage}_database_connection_failed`, err, { ...logMetadata, isDnsOrConnError: true });
+    return res.status(503).json({
+      error: "service_unavailable",
+      message: "Database connection failed. Please try again later.",
+    });
+  }
+  logger.error(logMessage, err, logMetadata);
+  res.status(500).json({ error: "internal_error" });
+}
 
 const app = express();
+app.use(
+  cors({
+    origin: config.corsOrigin,
+  })
+);
 app.use(express.json());
 
-// --- Observability Endpoints ---
+// Request Context Middleware & Metrics Instrumentation
+app.use((req: any, res: any, next) => {
+  const reqId = (req.headers["x-request-id"] as string) || uuidv4();
+  req.id = reqId;
+  res.setHeader("X-Request-ID", reqId);
+  
+  // Metrics: increment active requests
+  activeRequests.inc();
+  
+  const startMs = Date.now();
+  const startHr = process.hrtime();
+  
+  asyncLocalStorage.run({ requestId: reqId }, () => {
+    res.on("finish", () => {
+      activeRequests.dec();
+      const durationMs = Date.now() - startMs;
+      
+      const diff = process.hrtime(startHr);
+      const durationSeconds = diff[0] + diff[1] / 1e9;
+      
+      // Log request completion (conditionally skip metrics path to reduce logs noise)
+      if (req.path !== "/metrics") {
+        logger.info("request_completed", {
+          requestId: reqId, // Explicit fallback mapping
+          method: req.method,
+          url: req.url,
+          statusCode: res.statusCode,
+          latencyMs: durationMs,
+        });
+      }
+
+      // Metrics: normalize path to avoid label cardinality explosion
+      let path = req.path;
+      if (req.route && req.route.path) {
+        path = req.route.path;
+      } else if (path.startsWith("/r/")) {
+        path = "/r/:code";
+      }
+
+      httpRequestsTotal.inc({
+        method: req.method,
+        path: path,
+        status: res.statusCode.toString(),
+      });
+
+      httpRequestDurationSeconds.observe({
+        method: req.method,
+        path: path,
+        status: res.statusCode.toString(),
+      }, durationSeconds);
+    });
+
+    next();
+  });
+});
+
 app.get("/health", (req, res) => res.status(200).send("OK"));
+app.get("/live", (req, res) => res.status(200).send("OK"));
+app.get("/error-test", (req, res) => {
+  throw new Error("Triggered test 500 error");
+});
 
 app.get("/ready", async (req, res) => {
   try {
@@ -33,25 +132,13 @@ app.get("/ready", async (req, res) => {
   }
 });
 
-// Request Context Middleware (Correlation ID)
-app.use((req: any, _res, next) => {
-  req.id = req.headers["x-request-id"] || uuidv4();
-  next();
-});
-
-// Logger Middleware
-app.use((req: any, res: any, next) => {
-  const start = Date.now();
-  res.on("finish", () => {
-    logger.info("request_completed", {
-      requestId: req.id,
-      method: req.method,
-      url: req.url,
-      statusCode: res.statusCode,
-      latencyMs: Date.now() - start,
-    });
-  });
-  next();
+app.get("/metrics", async (req, res) => {
+  try {
+    res.set("Content-Type", register.contentType);
+    res.end(await register.metrics());
+  } catch (err) {
+    res.status(500).end(err);
+  }
 });
 
 const authenticate = (req: any, res: any, next: any) => {
@@ -105,7 +192,7 @@ app.get("/r/:code", limiters.redirect, async (req: any, res: any) => {
         logger.info("Thundering herd avoided, waiting for in-flight request", { code });
         targetLink = await inFlight.get(code)!;
       } else {
-        // 3. Fallback to DB (with In-Flight tracking)
+        // 3. Fallback to DB (wrapped with Circuit Breaker + Retry context)
         const fetchPromise = (async () => {
           try {
             logger.info("Cache miss, querying DB...", { code });
@@ -114,10 +201,12 @@ app.get("/r/:code", limiters.redirect, async (req: any, res: any) => {
             if (!tenantId) return null;
 
             const db = getDb(config.databaseUrl);
-            const link = await db.link.findUnique({
-              where: { tenantId_code: { tenantId, code } },
-              select: { id: true, longUrl: true, expiresAt: true },
-            });
+            const link = await executeResilientDb(() => 
+              db.link.findUnique({
+                where: { tenantId_code: { tenantId, code } },
+                select: { id: true, longUrl: true, expiresAt: true },
+              })
+            );
 
             if (!link) return null;
             if (link.expiresAt && link.expiresAt.getTime() <= Date.now()) return null;
@@ -162,8 +251,7 @@ app.get("/r/:code", limiters.redirect, async (req: any, res: any) => {
 
     res.redirect(302, targetLink.longUrl);
   } catch (err) {
-    logger.error("redirect_failed", err, { requestId: req.id, code });
-    res.status(500).json({ error: "internal_error" });
+    handleRouteError(res, err, "redirect_failed", { requestId: req.id, code });
   }
 });
 
@@ -180,20 +268,30 @@ app.post("/links", authenticate, async (req: any, res: any) => {
 
   const db = getDb(config.databaseUrl);
   try {
-    const link = await db.link.create({
-      data: {
-        tenantId,
-        teamId: teamIdHeader || null,
-        code,
-        longUrl,
-        expiresAt: expiresAt ? new Date(expiresAt) : null,
-        createdAt: new Date(),
-        tags: tags || [],
-        createdBy,
-      },
-    });
+    // Wrapped with Circuit Breaker + Retry context
+    const link = await executeResilientDb(() =>
+      db.link.create({
+        data: {
+          tenantId,
+          teamId: teamIdHeader || null,
+          code,
+          longUrl,
+          expiresAt: expiresAt ? new Date(expiresAt) : null,
+          createdAt: new Date(),
+          tags: tags || [],
+          createdBy,
+        },
+      })
+    );
     res.status(201).json(link);
   } catch (err) {
+    if (isDatabaseConnectionError(err)) {
+      logger.error("link_creation_failed_database_connection", err, { tenantId, code });
+      return res.status(503).json({
+        error: "service_unavailable",
+        message: "Database connection failed. Please try again later.",
+      });
+    }
     logger.error("link_creation_failed", err, { tenantId, code });
     res.status(400).json({ error: "failed_to_create_link" });
   }
@@ -234,13 +332,15 @@ app.get("/links/search", authenticate, async (req: any, res: any) => {
     }
 
     const [links, total] = await Promise.all([
-      db.link.findMany({
-        where,
-        skip,
-        take,
-        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-      }),
-      db.link.count({ where }),
+      executeResilientDb(() =>
+        db.link.findMany({
+          where,
+          skip,
+          take,
+          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        })
+      ),
+      executeResilientDb(() => db.link.count({ where })),
     ]);
 
     res.json({
@@ -253,8 +353,7 @@ app.get("/links/search", authenticate, async (req: any, res: any) => {
       },
     });
   } catch (err) {
-    logger.error("search_failed", err, { tenantId, q });
-    res.status(500).json({ error: "search_failed" });
+    handleRouteError(res, err, "search_failed", { tenantId, q });
   }
 });
 
@@ -266,13 +365,15 @@ app.get("/links", authenticate, async (req: any, res: any) => {
     const where: any = { tenantId };
     if (teamIdHeader) where.teamId = teamIdHeader;
 
-    const links = await db.link.findMany({
-      where,
-      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-    });
+    const links = await executeResilientDb(() =>
+      db.link.findMany({
+        where,
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      })
+    );
     res.json(links);
   } catch (err) {
-    res.status(500).json({ error: "failed_to_fetch_links" });
+    handleRouteError(res, err, "failed_to_fetch_links", { tenantId });
   }
 });
 
@@ -281,10 +382,12 @@ app.get("/teams/:id/members", authenticate, async (req: any, res: any) => {
   const teamId = req.params.id;
   const db = getDb(config.databaseUrl);
   try {
-    const members = await db.teamMember.findMany({
-      where: { teamId },
-      select: { userId: true, role: true, joinedAt: true },
-    });
+    const members = await executeResilientDb(() =>
+      db.teamMember.findMany({
+        where: { teamId },
+        select: { userId: true, role: true, joinedAt: true },
+      })
+    );
     res.json(members);
   } catch (err) {
     logger.error("failed_to_list_members", err, { teamId });
@@ -297,17 +400,21 @@ app.delete("/teams/:id/members/:userId", authenticate, async (req: any, res: any
   const targetUserId = req.params.userId;
   const db = getDb(config.databaseUrl);
   try {
-    const requesterMembership = await db.teamMember.findUnique({
-      where: { teamId_userId: { teamId, userId: req.user.id } },
-    });
+    const requesterMembership = await executeResilientDb(() =>
+      db.teamMember.findUnique({
+        where: { teamId_userId: { teamId, userId: req.user.id } },
+      })
+    );
 
     if (!requesterMembership || requesterMembership.role !== "ADMIN") {
       return res.status(403).json({ error: "forbidden" });
     }
 
-    await db.teamMember.delete({
-      where: { teamId_userId: { teamId, userId: targetUserId } },
-    });
+    await executeResilientDb(() =>
+      db.teamMember.delete({
+        where: { teamId_userId: { teamId, userId: targetUserId } },
+      })
+    );
 
     res.status(204).send();
   } catch (err) {
@@ -323,9 +430,11 @@ app.post("/teams/:id/invitations", authenticate, async (req: any, res: any) => {
   const db = getDb(config.databaseUrl);
 
   try {
-    const requesterMembership = await db.teamMember.findUnique({
-      where: { teamId_userId: { teamId, userId: req.user.id } },
-    });
+    const requesterMembership = await executeResilientDb(() =>
+      db.teamMember.findUnique({
+        where: { teamId_userId: { teamId, userId: req.user.id } },
+      })
+    );
 
     if (!requesterMembership || requesterMembership.role !== "ADMIN") {
       return res.status(403).json({ error: "forbidden" });
@@ -334,15 +443,17 @@ app.post("/teams/:id/invitations", authenticate, async (req: any, res: any) => {
     const token = uuidv4();
     const expiresAt = expiresInDays ? new Date(Date.now() + Number(expiresInDays) * 24 * 60 * 60 * 1000) : new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
 
-    const inv = await db.invitation.create({
-      data: {
-        token,
-        email,
-        teamId,
-        role: role || "MEMBER",
-        expiresAt,
-      },
-    });
+    const inv = await executeResilientDb(() =>
+      db.invitation.create({
+        data: {
+          token,
+          email,
+          teamId,
+          role: role || "MEMBER",
+          expiresAt,
+        },
+      })
+    );
 
     res.status(201).json({ token: inv.token, expiresAt: inv.expiresAt });
   } catch (err) {
@@ -358,25 +469,27 @@ app.post("/invitations/accept", authenticate, async (req: any, res: any) => {
   const db = getDb(config.databaseUrl);
 
   try {
-    const inv = await db.invitation.findUnique({ where: { token } });
+    const inv = await executeResilientDb(() => db.invitation.findUnique({ where: { token } }));
     if (!inv) return res.status(404).json({ error: "invalid_token" });
     if (inv.expiresAt && inv.expiresAt.getTime() <= Date.now()) {
       return res.status(400).json({ error: "token_expired" });
     }
 
     // Idempotent create
-    const existing = await db.teamMember.findUnique({ where: { teamId_userId: { teamId: inv.teamId, userId } } });
+    const existing = await executeResilientDb(() => db.teamMember.findUnique({ where: { teamId_userId: { teamId: inv.teamId, userId } } }));
     if (existing) {
       // Remove the invitation and return existing membership
-      await db.invitation.delete({ where: { id: inv.id } });
+      await executeResilientDb(() => db.invitation.delete({ where: { id: inv.id } }));
       return res.status(200).json(existing);
     }
 
-    const membership = await db.teamMember.create({
-      data: { teamId: inv.teamId, userId, role: inv.role },
-    });
+    const membership = await executeResilientDb(() =>
+      db.teamMember.create({
+        data: { teamId: inv.teamId, userId, role: inv.role },
+      })
+    );
 
-    await db.invitation.delete({ where: { id: inv.id } });
+    await executeResilientDb(() => db.invitation.delete({ where: { id: inv.id } }));
 
     res.status(201).json(membership);
   } catch (err) {
@@ -391,23 +504,25 @@ app.get("/teams/:id/activity", authenticate, async (req: any, res: any) => {
   const db = getDb(config.databaseUrl);
 
   try {
-    const membership = await db.teamMember.findUnique({ where: { teamId_userId: { teamId, userId: req.user.id } } });
+    const membership = await executeResilientDb(() => db.teamMember.findUnique({ where: { teamId_userId: { teamId, userId: req.user.id } } }));
     if (!membership) return res.status(403).json({ error: "forbidden" });
 
     // Batched single query replacing N+1 loop
-    const links = await db.link.findMany({
-      where: { teamId },
-      orderBy: { createdAt: "desc" },
-      take: 50,
-      include: {
-        _count: { select: { clicks: true } },
-        clicks: {
-          orderBy: { timestamp: "desc" },
-          take: 1,
-          select: { timestamp: true },
+    const links = await executeResilientDb(() =>
+      db.link.findMany({
+        where: { teamId },
+        orderBy: { createdAt: "desc" },
+        take: 50,
+        include: {
+          _count: { select: { clicks: true } },
+          clicks: {
+            orderBy: { timestamp: "desc" },
+            take: 1,
+            select: { timestamp: true },
+          },
         },
-      },
-    });
+      })
+    );
 
     const summaries = links.map((l: any) => ({
       type: "link_summary",
@@ -433,15 +548,17 @@ app.patch("/links/:id", authenticate, async (req: any, res: any) => {
 
   const db = getDb(config.databaseUrl);
   try {
-    const link = await db.link.findUnique({ where: { id: linkId } });
+    const link = await executeResilientDb(() => db.link.findUnique({ where: { id: linkId } }));
     if (!link || link.tenantId !== tenantId) {
       return res.status(404).json({ error: "not_found" });
     }
 
-    const updated = await db.link.update({
-      where: { id: linkId },
-      data: { longUrl, expiresAt: expiresAt ? new Date(expiresAt) : null, tags },
-    });
+    const updated = await executeResilientDb(() =>
+      db.link.update({
+        where: { id: linkId },
+        data: { longUrl, expiresAt: expiresAt ? new Date(expiresAt) : null, tags },
+      })
+    );
 
     await cacheService.invalidateRedirectTarget(updated.code);
     res.json(updated);
@@ -456,12 +573,12 @@ app.delete("/links/:id", authenticate, async (req: any, res: any) => {
 
   const db = getDb(config.databaseUrl);
   try {
-    const link = await db.link.findUnique({ where: { id: linkId } });
+    const link = await executeResilientDb(() => db.link.findUnique({ where: { id: linkId } }));
     if (!link || link.tenantId !== tenantId) {
       return res.status(404).json({ error: "not_found" });
     }
 
-    await db.link.delete({ where: { id: linkId } });
+    await executeResilientDb(() => db.link.delete({ where: { id: linkId } }));
     await cacheService.invalidateRedirectTarget(link.code);
     res.status(204).send();
   } catch (err) {
@@ -477,29 +594,35 @@ app.get("/links/:id/analytics", authenticate, async (req: any, res: any) => {
 
   const db = getDb(config.databaseUrl);
   try {
-    const link = await db.link.findUnique({
-      where: { id: linkId, tenantId },
-    });
+    const link = await executeResilientDb(() =>
+      db.link.findUnique({
+        where: { id: linkId, tenantId },
+      })
+    );
 
     if (!link) {
       return res.status(404).json({ error: "not_found" });
     }
 
-    const clicksCount = await db.linkClick.count({
-      where: {
-        linkId,
-        timestamp: {
-          gte: from ? new Date(String(from)) : new Date(0),
-          lte: to ? new Date(String(to)) : new Date(),
+    const clicksCount = await executeResilientDb(() =>
+      db.linkClick.count({
+        where: {
+          linkId,
+          timestamp: {
+            gte: from ? new Date(String(from)) : new Date(0),
+            lte: to ? new Date(String(to)) : new Date(),
+          },
         },
-      },
-    });
+      })
+    );
 
-    const lastClick = await db.linkClick.findFirst({
-      where: { linkId },
-      orderBy: { timestamp: "desc" },
-      select: { timestamp: true },
-    });
+    const lastClick = await executeResilientDb(() =>
+      db.linkClick.findFirst({
+        where: { linkId },
+        orderBy: { timestamp: "desc" },
+        select: { timestamp: true },
+      })
+    );
 
     res.json({
       link_id: linkId,
@@ -507,8 +630,7 @@ app.get("/links/:id/analytics", authenticate, async (req: any, res: any) => {
       last_click: lastClick?.timestamp || null,
     });
   } catch (err) {
-    logger.error("failed_to_fetch_analytics", err, { linkId });
-    res.status(500).json({ error: "internal_error" });
+    handleRouteError(res, err, "failed_to_fetch_analytics", { linkId });
   }
 });
 
@@ -517,18 +639,20 @@ app.post("/teams", limiters.createLink, authenticate, async (req: any, res: any)
 
   const db = getDb(config.databaseUrl);
   try {
-    const team = await db.team.create({
-      data: {
-        name,
-        slug,
-        members: {
-          create: {
-            userId: req.user.id,
-            role: "ADMIN",
+    const team = await executeResilientDb(() =>
+      db.team.create({
+        data: {
+          name,
+          slug,
+          members: {
+            create: {
+              userId: req.user.id,
+              role: "ADMIN",
           },
         },
       },
-    });
+    })
+    );
     res.status(201).json(team);
   } catch (err) {
     logger.error("team_creation_failed", err, { slug });
@@ -585,5 +709,13 @@ if (require.main === module) {
 // Global Error Handler
 app.use((err: any, _req: any, res: any, _next: any) => {
   logger.error("unhandled_error", err);
-  res.status(500).json({ error: "internal_error" });
+  
+  const isDev = config.env === "development";
+  const isTest = config.env === "test";
+  const isStaging = config.env === "staging";
+
+  res.status(500).json({
+    error: "internal_error",
+    ...((isDev || isTest || isStaging) ? { details: err.message, stack: err.stack } : {}),
+  });
 });

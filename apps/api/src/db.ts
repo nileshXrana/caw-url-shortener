@@ -8,7 +8,13 @@ export function getDb(databaseUrl: string, maxConnections = 17): PrismaClient {
   const cacheKey = `${databaseUrl}:${maxConnections}`;
   if (clients.has(cacheKey)) return clients.get(cacheKey)!.prisma;
 
-  const pool = new Pool({ connectionString: databaseUrl, max: maxConnections });
+  // Added query_timeout: 1000 to force driver-level cancellation at 1 second
+  const pool = new Pool({ 
+    connectionString: databaseUrl, 
+    max: maxConnections,
+    query_timeout: 1000 
+  });
+  
   const adapter = new PrismaPg(pool);
   const prisma = new PrismaClient({ adapter });
 

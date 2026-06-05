@@ -4,20 +4,99 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.app = void 0;
+const config_1 = require("./config");
 const express_1 = __importDefault(require("express"));
+const cors_1 = __importDefault(require("cors"));
 const uuid_1 = require("uuid");
 const logger_1 = require("./logger");
 const redis_1 = require("./redis");
 const analytics_1 = require("./jobs/analytics");
-const config_1 = require("./config");
 const db_1 = require("./db");
 const jsonwebtoken_1 = __importDefault(require("jsonwebtoken"));
 const url_1 = require("./url");
 const ioredis_1 = require("ioredis");
+const resilience_1 = require("./resilience");
+const metrics_1 = require("./metrics");
+function isDatabaseConnectionError(err) {
+    if (!err)
+        return false;
+    const msg = String(err.message || "");
+    const code = String(err.code || "");
+    const name = String(err.name || "");
+    return (name.includes("PrismaClientInitializationError") ||
+        (name.includes("PrismaClientKnownRequestError") && (code === "P1001" ||
+            code === "P1008" ||
+            msg.includes("Can't reach database server"))) ||
+        msg.includes("ENOTFOUND") ||
+        msg.includes("getaddrinfo") ||
+        msg.includes("ECONNREFUSED") ||
+        msg.includes("Circuit breaker open"));
+}
+function handleRouteError(res, err, logMessage, logMetadata = {}) {
+    if (isDatabaseConnectionError(err)) {
+        logger_1.logger.error(`${logMessage}_database_connection_failed`, err, { ...logMetadata, isDnsOrConnError: true });
+        return res.status(503).json({
+            error: "service_unavailable",
+            message: "Database connection failed. Please try again later.",
+        });
+    }
+    logger_1.logger.error(logMessage, err, logMetadata);
+    res.status(500).json({ error: "internal_error" });
+}
 const app = (0, express_1.default)();
 exports.app = app;
+app.use((0, cors_1.default)({
+    origin: config_1.config.corsOrigin,
+}));
 app.use(express_1.default.json());
+app.use((req, res, next) => {
+    const reqId = req.headers["x-request-id"] || (0, uuid_1.v4)();
+    req.id = reqId;
+    res.setHeader("X-Request-ID", reqId);
+    metrics_1.activeRequests.inc();
+    const startMs = Date.now();
+    const startHr = process.hrtime();
+    logger_1.asyncLocalStorage.run({ requestId: reqId }, () => {
+        res.on("finish", () => {
+            metrics_1.activeRequests.dec();
+            const durationMs = Date.now() - startMs;
+            const diff = process.hrtime(startHr);
+            const durationSeconds = diff[0] + diff[1] / 1e9;
+            if (req.path !== "/metrics") {
+                logger_1.logger.info("request_completed", {
+                    requestId: reqId,
+                    method: req.method,
+                    url: req.url,
+                    statusCode: res.statusCode,
+                    latencyMs: durationMs,
+                });
+            }
+            let path = req.path;
+            if (req.route && req.route.path) {
+                path = req.route.path;
+            }
+            else if (path.startsWith("/r/")) {
+                path = "/r/:code";
+            }
+            metrics_1.httpRequestsTotal.inc({
+                method: req.method,
+                path: path,
+                status: res.statusCode.toString(),
+            });
+            metrics_1.httpRequestDurationSeconds.observe({
+                method: req.method,
+                path: path,
+                status: res.statusCode.toString(),
+            }, durationSeconds);
+        });
+        next();
+    });
+});
 app.get("/health", (req, res) => res.status(200).send("OK"));
+app.get("/live", (req, res) => res.status(200).send("OK"));
+app.get("/error-test", (req, res) => {
+    throw new Error("Triggered test 500 error");
+});
 app.get("/ready", async (req, res) => {
     try {
         const db = (0, db_1.getDb)(config_1.config.databaseUrl);
@@ -32,22 +111,14 @@ app.get("/ready", async (req, res) => {
         res.status(503).send("NOT_READY");
     }
 });
-app.use((req, _res, next) => {
-    req.id = req.headers["x-request-id"] || (0, uuid_1.v4)();
-    next();
-});
-app.use((req, res, next) => {
-    const start = Date.now();
-    res.on("finish", () => {
-        logger_1.logger.info("request_completed", {
-            requestId: req.id,
-            method: req.method,
-            url: req.url,
-            statusCode: res.statusCode,
-            latencyMs: Date.now() - start,
-        });
-    });
-    next();
+app.get("/metrics", async (req, res) => {
+    try {
+        res.set("Content-Type", metrics_1.register.contentType);
+        res.end(await metrics_1.register.metrics());
+    }
+    catch (err) {
+        res.status(500).end(err);
+    }
 });
 const authenticate = (req, res, next) => {
     const authHeader = req.headers.authorization;
@@ -93,10 +164,10 @@ app.get("/r/:code", limiters.redirect, async (req, res) => {
                         if (!tenantId)
                             return null;
                         const db = (0, db_1.getDb)(config_1.config.databaseUrl);
-                        const link = await db.link.findUnique({
+                        const link = await (0, resilience_1.executeResilientDb)(() => db.link.findUnique({
                             where: { tenantId_code: { tenantId, code } },
                             select: { id: true, longUrl: true, expiresAt: true },
-                        });
+                        }));
                         if (!link)
                             return null;
                         if (link.expiresAt && link.expiresAt.getTime() <= Date.now())
@@ -137,8 +208,7 @@ app.get("/r/:code", limiters.redirect, async (req, res) => {
         res.redirect(302, targetLink.longUrl);
     }
     catch (err) {
-        logger_1.logger.error("redirect_failed", err, { requestId: req.id, code });
-        res.status(500).json({ error: "internal_error" });
+        handleRouteError(res, err, "redirect_failed", { requestId: req.id, code });
     }
 });
 app.post("/links", authenticate, async (req, res) => {
@@ -151,7 +221,7 @@ app.post("/links", authenticate, async (req, res) => {
     }
     const db = (0, db_1.getDb)(config_1.config.databaseUrl);
     try {
-        const link = await db.link.create({
+        const link = await (0, resilience_1.executeResilientDb)(() => db.link.create({
             data: {
                 tenantId,
                 teamId: teamIdHeader || null,
@@ -162,10 +232,17 @@ app.post("/links", authenticate, async (req, res) => {
                 tags: tags || [],
                 createdBy,
             },
-        });
+        }));
         res.status(201).json(link);
     }
     catch (err) {
+        if (isDatabaseConnectionError(err)) {
+            logger_1.logger.error("link_creation_failed_database_connection", err, { tenantId, code });
+            return res.status(503).json({
+                error: "service_unavailable",
+                message: "Database connection failed. Please try again later.",
+            });
+        }
         logger_1.logger.error("link_creation_failed", err, { tenantId, code });
         res.status(400).json({ error: "failed_to_create_link" });
     }
@@ -199,13 +276,13 @@ app.get("/links/search", authenticate, async (req, res) => {
             where.tags = { hasSome: tagsToFilter };
         }
         const [links, total] = await Promise.all([
-            db.link.findMany({
+            (0, resilience_1.executeResilientDb)(() => db.link.findMany({
                 where,
                 skip,
                 take,
                 orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-            }),
-            db.link.count({ where }),
+            })),
+            (0, resilience_1.executeResilientDb)(() => db.link.count({ where })),
         ]);
         res.json({
             data: links,
@@ -218,8 +295,7 @@ app.get("/links/search", authenticate, async (req, res) => {
         });
     }
     catch (err) {
-        logger_1.logger.error("search_failed", err, { tenantId, q });
-        res.status(500).json({ error: "search_failed" });
+        handleRouteError(res, err, "search_failed", { tenantId, q });
     }
 });
 app.get("/links", authenticate, async (req, res) => {
@@ -230,24 +306,24 @@ app.get("/links", authenticate, async (req, res) => {
         const where = { tenantId };
         if (teamIdHeader)
             where.teamId = teamIdHeader;
-        const links = await db.link.findMany({
+        const links = await (0, resilience_1.executeResilientDb)(() => db.link.findMany({
             where,
             orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-        });
+        }));
         res.json(links);
     }
     catch (err) {
-        res.status(500).json({ error: "failed_to_fetch_links" });
+        handleRouteError(res, err, "failed_to_fetch_links", { tenantId });
     }
 });
 app.get("/teams/:id/members", authenticate, async (req, res) => {
     const teamId = req.params.id;
     const db = (0, db_1.getDb)(config_1.config.databaseUrl);
     try {
-        const members = await db.teamMember.findMany({
+        const members = await (0, resilience_1.executeResilientDb)(() => db.teamMember.findMany({
             where: { teamId },
             select: { userId: true, role: true, joinedAt: true },
-        });
+        }));
         res.json(members);
     }
     catch (err) {
@@ -260,15 +336,15 @@ app.delete("/teams/:id/members/:userId", authenticate, async (req, res) => {
     const targetUserId = req.params.userId;
     const db = (0, db_1.getDb)(config_1.config.databaseUrl);
     try {
-        const requesterMembership = await db.teamMember.findUnique({
+        const requesterMembership = await (0, resilience_1.executeResilientDb)(() => db.teamMember.findUnique({
             where: { teamId_userId: { teamId, userId: req.user.id } },
-        });
+        }));
         if (!requesterMembership || requesterMembership.role !== "ADMIN") {
             return res.status(403).json({ error: "forbidden" });
         }
-        await db.teamMember.delete({
+        await (0, resilience_1.executeResilientDb)(() => db.teamMember.delete({
             where: { teamId_userId: { teamId, userId: targetUserId } },
-        });
+        }));
         res.status(204).send();
     }
     catch (err) {
@@ -281,15 +357,15 @@ app.post("/teams/:id/invitations", authenticate, async (req, res) => {
     const { email, role, expiresInDays } = req.body;
     const db = (0, db_1.getDb)(config_1.config.databaseUrl);
     try {
-        const requesterMembership = await db.teamMember.findUnique({
+        const requesterMembership = await (0, resilience_1.executeResilientDb)(() => db.teamMember.findUnique({
             where: { teamId_userId: { teamId, userId: req.user.id } },
-        });
+        }));
         if (!requesterMembership || requesterMembership.role !== "ADMIN") {
             return res.status(403).json({ error: "forbidden" });
         }
         const token = (0, uuid_1.v4)();
         const expiresAt = expiresInDays ? new Date(Date.now() + Number(expiresInDays) * 24 * 60 * 60 * 1000) : new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
-        const inv = await db.invitation.create({
+        const inv = await (0, resilience_1.executeResilientDb)(() => db.invitation.create({
             data: {
                 token,
                 email,
@@ -297,7 +373,7 @@ app.post("/teams/:id/invitations", authenticate, async (req, res) => {
                 role: role || "MEMBER",
                 expiresAt,
             },
-        });
+        }));
         res.status(201).json({ token: inv.token, expiresAt: inv.expiresAt });
     }
     catch (err) {
@@ -310,21 +386,21 @@ app.post("/invitations/accept", authenticate, async (req, res) => {
     const userId = req.user.id;
     const db = (0, db_1.getDb)(config_1.config.databaseUrl);
     try {
-        const inv = await db.invitation.findUnique({ where: { token } });
+        const inv = await (0, resilience_1.executeResilientDb)(() => db.invitation.findUnique({ where: { token } }));
         if (!inv)
             return res.status(404).json({ error: "invalid_token" });
         if (inv.expiresAt && inv.expiresAt.getTime() <= Date.now()) {
             return res.status(400).json({ error: "token_expired" });
         }
-        const existing = await db.teamMember.findUnique({ where: { teamId_userId: { teamId: inv.teamId, userId } } });
+        const existing = await (0, resilience_1.executeResilientDb)(() => db.teamMember.findUnique({ where: { teamId_userId: { teamId: inv.teamId, userId } } }));
         if (existing) {
-            await db.invitation.delete({ where: { id: inv.id } });
+            await (0, resilience_1.executeResilientDb)(() => db.invitation.delete({ where: { id: inv.id } }));
             return res.status(200).json(existing);
         }
-        const membership = await db.teamMember.create({
+        const membership = await (0, resilience_1.executeResilientDb)(() => db.teamMember.create({
             data: { teamId: inv.teamId, userId, role: inv.role },
-        });
-        await db.invitation.delete({ where: { id: inv.id } });
+        }));
+        await (0, resilience_1.executeResilientDb)(() => db.invitation.delete({ where: { id: inv.id } }));
         res.status(201).json(membership);
     }
     catch (err) {
@@ -336,10 +412,10 @@ app.get("/teams/:id/activity", authenticate, async (req, res) => {
     const teamId = req.params.id;
     const db = (0, db_1.getDb)(config_1.config.databaseUrl);
     try {
-        const membership = await db.teamMember.findUnique({ where: { teamId_userId: { teamId, userId: req.user.id } } });
+        const membership = await (0, resilience_1.executeResilientDb)(() => db.teamMember.findUnique({ where: { teamId_userId: { teamId, userId: req.user.id } } }));
         if (!membership)
             return res.status(403).json({ error: "forbidden" });
-        const links = await db.link.findMany({
+        const links = await (0, resilience_1.executeResilientDb)(() => db.link.findMany({
             where: { teamId },
             orderBy: { createdAt: "desc" },
             take: 50,
@@ -351,7 +427,7 @@ app.get("/teams/:id/activity", authenticate, async (req, res) => {
                     select: { timestamp: true },
                 },
             },
-        });
+        }));
         const summaries = links.map((l) => ({
             type: "link_summary",
             linkId: l.id,
@@ -374,14 +450,14 @@ app.patch("/links/:id", authenticate, async (req, res) => {
     const { longUrl, expiresAt, tags } = req.body;
     const db = (0, db_1.getDb)(config_1.config.databaseUrl);
     try {
-        const link = await db.link.findUnique({ where: { id: linkId } });
+        const link = await (0, resilience_1.executeResilientDb)(() => db.link.findUnique({ where: { id: linkId } }));
         if (!link || link.tenantId !== tenantId) {
             return res.status(404).json({ error: "not_found" });
         }
-        const updated = await db.link.update({
+        const updated = await (0, resilience_1.executeResilientDb)(() => db.link.update({
             where: { id: linkId },
             data: { longUrl, expiresAt: expiresAt ? new Date(expiresAt) : null, tags },
-        });
+        }));
         await redis_1.cacheService.invalidateRedirectTarget(updated.code);
         res.json(updated);
     }
@@ -394,11 +470,11 @@ app.delete("/links/:id", authenticate, async (req, res) => {
     const linkId = req.params.id;
     const db = (0, db_1.getDb)(config_1.config.databaseUrl);
     try {
-        const link = await db.link.findUnique({ where: { id: linkId } });
+        const link = await (0, resilience_1.executeResilientDb)(() => db.link.findUnique({ where: { id: linkId } }));
         if (!link || link.tenantId !== tenantId) {
             return res.status(404).json({ error: "not_found" });
         }
-        await db.link.delete({ where: { id: linkId } });
+        await (0, resilience_1.executeResilientDb)(() => db.link.delete({ where: { id: linkId } }));
         await redis_1.cacheService.invalidateRedirectTarget(link.code);
         res.status(204).send();
     }
@@ -412,13 +488,13 @@ app.get("/links/:id/analytics", authenticate, async (req, res) => {
     const { from, to } = req.query;
     const db = (0, db_1.getDb)(config_1.config.databaseUrl);
     try {
-        const link = await db.link.findUnique({
+        const link = await (0, resilience_1.executeResilientDb)(() => db.link.findUnique({
             where: { id: linkId, tenantId },
-        });
+        }));
         if (!link) {
             return res.status(404).json({ error: "not_found" });
         }
-        const clicksCount = await db.linkClick.count({
+        const clicksCount = await (0, resilience_1.executeResilientDb)(() => db.linkClick.count({
             where: {
                 linkId,
                 timestamp: {
@@ -426,12 +502,12 @@ app.get("/links/:id/analytics", authenticate, async (req, res) => {
                     lte: to ? new Date(String(to)) : new Date(),
                 },
             },
-        });
-        const lastClick = await db.linkClick.findFirst({
+        }));
+        const lastClick = await (0, resilience_1.executeResilientDb)(() => db.linkClick.findFirst({
             where: { linkId },
             orderBy: { timestamp: "desc" },
             select: { timestamp: true },
-        });
+        }));
         res.json({
             link_id: linkId,
             total_clicks: clicksCount,
@@ -439,15 +515,14 @@ app.get("/links/:id/analytics", authenticate, async (req, res) => {
         });
     }
     catch (err) {
-        logger_1.logger.error("failed_to_fetch_analytics", err, { linkId });
-        res.status(500).json({ error: "internal_error" });
+        handleRouteError(res, err, "failed_to_fetch_analytics", { linkId });
     }
 });
 app.post("/teams", limiters.createLink, authenticate, async (req, res) => {
     const { name, slug } = req.body;
     const db = (0, db_1.getDb)(config_1.config.databaseUrl);
     try {
-        const team = await db.team.create({
+        const team = await (0, resilience_1.executeResilientDb)(() => db.team.create({
             data: {
                 name,
                 slug,
@@ -458,7 +533,7 @@ app.post("/teams", limiters.createLink, authenticate, async (req, res) => {
                     },
                 },
             },
-        });
+        }));
         res.status(201).json(team);
     }
     catch (err) {
@@ -505,6 +580,12 @@ if (require.main === module) {
 }
 app.use((err, _req, res, _next) => {
     logger_1.logger.error("unhandled_error", err);
-    res.status(500).json({ error: "internal_error" });
+    const isDev = config_1.config.env === "development";
+    const isTest = config_1.config.env === "test";
+    const isStaging = config_1.config.env === "staging";
+    res.status(500).json({
+        error: "internal_error",
+        ...((isDev || isTest || isStaging) ? { details: err.message, stack: err.stack } : {}),
+    });
 });
 //# sourceMappingURL=main.js.map

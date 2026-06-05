@@ -10,7 +10,11 @@ function getDb(databaseUrl, maxConnections = 17) {
     const cacheKey = `${databaseUrl}:${maxConnections}`;
     if (clients.has(cacheKey))
         return clients.get(cacheKey).prisma;
-    const pool = new pg_1.Pool({ connectionString: databaseUrl, max: maxConnections });
+    const pool = new pg_1.Pool({
+        connectionString: databaseUrl,
+        max: maxConnections,
+        query_timeout: 1000
+    });
     const adapter = new adapter_pg_1.PrismaPg(pool);
     const prisma = new client_1.PrismaClient({ adapter });
     clients.set(cacheKey, { pool, prisma });

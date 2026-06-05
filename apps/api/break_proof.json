@@ -1,0 +1,11 @@
+{
+  "summary": "Injected Scenario A (Stale Runbook/Config Drift) by renaming the PostgreSQL container from linkops-postgres to linkops-db-postgres and stopping it.",
+  "evidence": [
+    "Modified infra/docker-compose.yml container_name to linkops-db-postgres.",
+    "Stopped old postgres container, recreated container, and stopped it to simulate DB connection outage.",
+    "Confirmed curl http://localhost:3000/ready returns HTTP 503 NOT_READY."
+  ],
+  "artifacts": [
+    "infra/docker-compose.yml"
+  ]
+}

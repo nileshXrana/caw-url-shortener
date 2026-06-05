@@ -1,0 +1,46 @@
+groups:
+  - name: url-shortener-alerts
+    rules:
+      - alert: HighErrorRate
+        expr: |
+          rate(http_requests_total{status=~"5.."}[5m])
+          / rate(http_requests_total[5m]) > 0.05
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Error rate exceeds 5%"
+          description: >
+            The service {{ $labels.service }} has an error rate of
+            {{ $value | humanizePercentage }} over the last 5 minutes.
+            This means more than 1 in 20 requests is failing.
+          runbook: "https://wiki.example.com/runbooks/high-error-rate"
+
+      - alert: HighLatency
+        expr: |
+          histogram_quantile(0.95,
+            rate(http_request_duration_seconds_bucket[5m])
+          ) > 2
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "95th percentile latency exceeds 2 seconds"
+          description: >
+            The service {{ $labels.service }} has p95 latency of
+            {{ $value | humanizeDuration }}. 5% of users are waiting
+            more than 2 seconds for a response.
+          runbook: "https://wiki.example.com/runbooks/high-latency"
+
+      - alert: ServiceDown
+        expr: up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Service is down"
+          description: >
+            The service {{ $labels.instance }} has been unreachable
+            for more than 1 minute. The Prometheus scraper cannot
+            reach the /metrics endpoint.
+          runbook: "https://wiki.example.com/runbooks/service-down"
