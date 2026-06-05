@@ -41,3 +41,4 @@ coverage/
 .env.development
 .env.test
 .env.production
+artifacts/*.tar
