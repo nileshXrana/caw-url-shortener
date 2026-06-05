@@ -16,8 +16,8 @@ URL shortener API that accepts long URLs and returns shortened aliases. Handles 
 | Redis | Cache & Queue | Performance degradation: all requests hit database directly. Analytics enqueues fail. | Degradation is handled gracefully: cache misses default to PG reads, and analytics queue enqueue errors are caught and logged without failing the user-facing HTTP request. |
 
 ### Endpoints
-*   `GET /live`: Liveness check. Returns `200 OK` with body `OK` when the process is running.
-*   `GET /ready`: Readiness check. Performs a raw database query (`SELECT 1`) and a Redis `PING` check. Returns `200 OK` with body `READY` if both are healthy, or `503 Service Unavailable` with body `NOT_READY` if either is down.
+*   `GET /live`: Liveness check. Returns `200 OK` with JSON `{ "ok": true }` when the process is running.
+*   `GET /ready`: Readiness check. Performs a raw database query (`SELECT 1`) and a Redis `PING` check. Returns `200 OK` with JSON `{ "ok": true, "checks": { "database": "connected", "cache": "connected" }, "uptime_seconds": ... }` if healthy, or `503 Service Unavailable` with JSON `{ "ok": false, "checks": { ... } }` if either is down.
 *   `GET /metrics`: Exposes Prometheus metrics (`http_requests_total`, `http_request_duration_seconds`, `active_requests`).
 *   `GET /r/:code`: Public redirect endpoint. Resolves short-code to long URL, updates local cache, and enqueues tracking jobs asynchronously.
 *   `POST /links`: Authenticated creation of shortened links.
@@ -42,12 +42,12 @@ git push origin main
 ```
 To verify the deployment status:
 ```bash
-curl -i http://localhost:3000/live
-curl -i http://localhost:3000/ready
+curl -s http://localhost:3000/live
+curl -s http://localhost:3000/ready
 ```
 Expected healthy output:
-*   `/live` -> `HTTP/1.1 200 OK` with body `OK`
-*   `/ready` -> `HTTP/1.1 200 OK` with body `READY`
+*   `/live` -> `{ "ok": true }`
+*   `/ready` -> `{ "ok": true, "checks": { "database": "connected", "cache": "connected" }, ... }`
 
 ### Rollback
 If a deployment introduces a critical regression, roll back immediately.
@@ -58,8 +58,8 @@ railway rollback --to <previous-deployment-id>
 ```
 To verify rollback:
 ```bash
-curl -i http://localhost:3000/live
-curl -i http://localhost:3000/ready
+curl -s http://localhost:3000/live
+curl -s http://localhost:3000/ready
 ```
 
 ### Ownership
@@ -77,87 +77,42 @@ curl -i http://localhost:3000/ready
 *   **Symptoms**: Users see `{"error": "service_unavailable", "message": "Database connection failed..."}` when resolving links. Readiness check `GET /ready` returns `503 Service Unavailable`.
 *   **Indicator**: Error rate of HTTP 5xx responses exceeds 5% over 5 minutes.
 
-### Diagnosis
-Run these commands in order:
+### Action Plan (Checklist with Failure fallbacks)
 
 **Step 1: Check application readiness status**
 ```bash
 curl -i http://localhost:3000/ready
 ```
-*   If this IS the problem, you will see:
-    ```http
-    HTTP/1.1 503 Service Unavailable
-    Content-Length: 9
-
-    NOT_READY
-    ```
-*   If this is NOT the problem, you will see:
-    ```http
-    HTTP/1.1 200 OK
-    Content-Length: 5
-
-    READY
-    ```
+*   **Expected Outcome**: Returns HTTP 503 and JSON showing `"database": "disconnected"`.
+*   *If this fails (e.g., connection timed out or port closed)*: The API process itself is down or blocked. Immediately skip to **High Latency Runbook** or restart the API server.
 
 **Step 2: Check PostgreSQL container state**
 ```bash
 docker inspect --format='{{.State.Status}}' linkops-db-postgres
 ```
-*   If this IS the problem (container stopped/crashed), you will see:
-    `exited`
-*   If this is NOT the problem, you will see:
-    `running`
+*   **Expected Outcome**: Output is `running`.
+*   *If this fails (e.g., output is `exited`, `paused`, or container not found)*: The Postgres container is down. Run `docker start linkops-db-postgres`. If it fails to start, check disk space (`df -h`) and Docker daemon status.
 
-**Step 3: Check database connectivity from host**
+**Step 3: Check database connectivity from within the container**
 ```bash
 docker exec linkops-db-postgres pg_isready -U postgres -d linkops
 ```
-*   Expected output if problem (DB rejecting connections / shutting down):
-    `Error response from daemon: container linkops-db-postgres is not running` (if stopped) or `/var/run/postgresql:5432 - no response` (if running but rejecting connections)
-*   Expected output if healthy:
-    `/var/run/postgresql:5432 - accepting connections`
+*   **Expected Outcome**: Output contains `/var/run/postgresql:5432 - accepting connections`.
+*   *If this fails (e.g., no response or rejection error)*: PostgreSQL database process inside the container is frozen or crashed. Proceed to Step 4 (Restart).
 
-### Fix
-Follow these steps in order:
-
-**Step 1: Restart the PostgreSQL container**
+**Step 4: Restart the PostgreSQL container**
 ```bash
 docker restart linkops-db-postgres
 ```
-*   Expected output:
-    `linkops-db-postgres`
-*   If this command hangs or fails, proceed to Escalation.
+*   **Expected Outcome**: Prints `linkops-db-postgres` and restarts successfully.
+*   *If this fails (e.g., command hangs or times out)*: Force-stop the container via `docker kill linkops-db-postgres` and then run `docker-compose -f infra/docker-compose.yml up -d db`. If it still fails, escalate immediately.
 
-**Step 2: Check PostgreSQL logs for startup errors**
+**Step 5: Check database logs for corruption or startup failures**
 ```bash
 docker logs --tail 50 linkops-db-postgres
 ```
-*   Expected output for healthy recovery:
-    `database system is ready to accept connections`
-
-### Verification
-Confirm the fix worked:
-```bash
-curl -i http://localhost:3000/ready
-```
-*   Expected output:
-    ```http
-    HTTP/1.1 200 OK
-
-    READY
-    ```
-
-Wait 2 minutes and check again:
-```bash
-curl -i http://localhost:3000/ready
-```
-*   Expected output should remain the same.
-
-### Escalation
-If this runbook does not resolve the issue within 5 minutes:
-1.  Post in Slack channel `#linkops-oncall` with output logs and timestamps.
-2.  Page Nile (Primary On-call) via PagerDuty/Slack.
-3.  If no response in 10 minutes, page Tech Lead (Secondary On-call).
+*   **Expected Outcome**: Ends with `database system is ready to accept connections`.
+*   *If this fails (e.g., log shows disk full or write-ahead-log corruption)*: DO NOT attempt to write or drop schemas. Escalate to Tech Lead immediately for WAL recovery.
 
 ---
 
@@ -168,78 +123,42 @@ If this runbook does not resolve the issue within 5 minutes:
 *   **Symptoms**: Response times increase, and `GET /ready` returns `503 Service Unavailable`.
 *   **Indicator**: Log search shows `Failed to record click` or `Redis Error` logs.
 
-### Diagnosis
-Run these commands in order:
+### Action Plan (Checklist with Failure fallbacks)
 
 **Step 1: Check application readiness status**
 ```bash
 curl -i http://localhost:3000/ready
 ```
-*   If this IS the problem, you will see:
-    ```http
-    HTTP/1.1 503 Service Unavailable
-
-    NOT_READY
-    ```
+*   **Expected Outcome**: Returns HTTP 503 and JSON showing `"cache": "disconnected"`.
+*   *If this fails (e.g., no response)*: Verify the API process is alive.
 
 **Step 2: Check Redis container state**
 ```bash
 docker inspect --format='{{.State.Status}}' linkops-redis
 ```
-*   If this IS the problem (container stopped/crashed), you will see:
-    `exited`
-*   If this is NOT the problem, you will see:
-    `running`
+*   **Expected Outcome**: Output is `running`.
+*   *If this fails (e.g., output is `exited`)*: Run `docker start linkops-redis`. If it fails to start, verify port conflicts or container name drift in the Docker configuration.
 
 **Step 3: Check Redis ping response**
 ```bash
 docker exec linkops-redis redis-cli ping
 ```
-*   Expected output if problem:
-    `Error: Connection refused` or no response
-*   Expected output if healthy:
-    `PONG`
+*   **Expected Outcome**: Output is `PONG`.
+*   *If this fails (e.g., `Error: Connection refused`)*: The Redis server process inside the container has crashed or is out of memory. Proceed to Step 4 (Restart).
 
-### Fix
-Follow these steps in order:
-
-**Step 1: Restart the Redis container**
+**Step 4: Restart the Redis container**
 ```bash
 docker restart linkops-redis
 ```
-*   Expected output:
-    `linkops-redis`
+*   **Expected Outcome**: Prints `linkops-redis` and restarts successfully.
+*   *If this fails (e.g., hangs)*: Run `docker kill linkops-redis` followed by `docker start linkops-redis`. If still unresolved, escalate.
 
-**Step 2: Verify Redis responds**
+**Step 5: Verify Redis responds post-restart**
 ```bash
 docker exec linkops-redis redis-cli ping
 ```
-*   Expected output:
-    `PONG`
-
-### Verification
-Confirm the fix worked:
-```bash
-curl -i http://localhost:3000/ready
-```
-*   Expected output:
-    ```http
-    HTTP/1.1 200 OK
-
-    READY
-    ```
-
-Wait 2 minutes and check again:
-```bash
-curl -i http://localhost:3000/ready
-```
-*   Expected output should remain the same.
-
-### Escalation
-If this runbook does not resolve the issue within 5 minutes:
-1.  Post in `#linkops-oncall`.
-2.  Page Nile (Primary On-call).
-3.  If no response in 10 minutes, page Tech Lead.
+*   **Expected Outcome**: Returns `PONG`.
+*   *If this fails*: Escalate immediately.
 
 ---
 
@@ -250,72 +169,39 @@ If this runbook does not resolve the issue within 5 minutes:
 *   **Symptoms**: 95th percentile request latency exceeds 2 seconds. Users see slow redirects.
 *   **Indicator**: Prometheus shows `http_request_duration_seconds` spike.
 
-### Diagnosis
-Run these commands in order:
+### Action Plan (Checklist with Failure fallbacks)
 
 **Step 1: Check active request counts**
 ```bash
 curl -s http://localhost:3000/metrics | grep active_requests
 ```
-*   If this IS the problem (concurrency overload / thread pool block), you will see:
-    `active_requests` with a value greater than 50 (e.g., `active_requests 75`).
-*   If this is NOT the problem, you will see:
-    `active_requests 0` or low single-digits.
+*   **Expected Outcome**: Output is `active_requests` with a value less than 10.
+*   *If this fails (e.g., returns high values like >50)*: The server is experiencing a thundering herd or starvation. Proceed to Step 2.
 
 **Step 2: Check database active connections**
 ```bash
 docker exec linkops-db-postgres psql -U postgres -d linkops -c "SELECT count(*), state FROM pg_stat_activity GROUP BY state;"
 ```
-*   Expected output if database connections are saturated:
-    `active` state count close to the connection pool limit of `17`.
-*   Expected output if healthy:
-    `active` count low (e.g., 1-2).
+*   **Expected Outcome**: Active connections are low (< 5).
+*   *If this fails (e.g., active connections count is at the pool limit of 17)*: Queries are stacking up. Proceed to Step 3.
 
-**Step 3: Check for slow active queries**
+**Step 3: Identify slow running queries**
 ```bash
 docker exec linkops-db-postgres psql -U postgres -d linkops -c "SELECT pid, query, state, age(clock_timestamp(), query_start) FROM pg_stat_activity WHERE state != 'idle' ORDER BY age DESC LIMIT 5;"
 ```
-*   Expected output if query storm or locking:
-    Queries showing age > 1s.
+*   **Expected Outcome**: Query list displays with age information.
+*   *If this fails (e.g., database query times out or command hangs)*: The database is locked. Skip directly to Step 5 (Server Restart).
 
-### Fix
-Follow these steps in order:
-
-**Step 1: Terminate slow active queries taking more than 5 seconds**
+**Step 4: Terminate slow active queries taking more than 5 seconds**
 ```bash
 docker exec linkops-db-postgres psql -U postgres -d linkops -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE state != 'idle' AND age(clock_timestamp(), query_start) > interval '5 seconds';"
 ```
-*   Expected output:
-    List of terminated process IDs or `0 rows` if none.
+*   **Expected Outcome**: Prints terminated process IDs.
+*   *If this fails (e.g., queries cannot be terminated or keep spawning)*: A heavy transaction lock is active. Proceed to Step 5.
 
-**Step 2: Force-restart the local API service to clear connection limits**
+**Step 5: Restart the local API service and check connection health**
 ```bash
 kill $(lsof -t -i:3000) && npm run dev
 ```
-*   Expected output:
-    API logs showing server start and listening on port 3000.
-
-### Verification
-Confirm the fix worked:
-```bash
-curl -s http://localhost:3000/metrics | grep http_request_duration_seconds
-```
-*   Expected output:
-    Latency counts within low-duration buckets (<0.1s).
-
-Wait 2 minutes and check readiness:
-```bash
-curl -i http://localhost:3000/ready
-```
-*   Expected output:
-    ```http
-    HTTP/1.1 200 OK
-
-    READY
-    ```
-
-### Escalation
-If this runbook does not resolve the issue within 5 minutes:
-1.  Post in `#linkops-oncall`.
-2.  Page Nile (Primary On-call).
-3.  If no response in 10 minutes, page Tech Lead.
+*   **Expected Outcome**: API restarts and metrics latency buckets go down.
+*   *If this fails*: Verify that database pool sizes or Prisma adapter configurations haven't been altered recently in Git history.

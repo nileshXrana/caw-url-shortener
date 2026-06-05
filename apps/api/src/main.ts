@@ -4,7 +4,7 @@ import cors from "cors";
 import { PrismaClient } from "@prisma/client";
 import { v4 as uuidv4 } from "uuid";
 import { logger, asyncLocalStorage } from "./logger";
-import { cacheService, CachedLink } from "./redis";
+import { cacheService, CachedLink, redis } from "./redis";
 import { analyticsQueue, startAnalyticsWorker } from "./jobs/analytics";
 import { getDb, disconnectAll } from "./db";
 import { createHash } from "crypto";
@@ -110,26 +110,56 @@ app.use((req: any, res: any, next) => {
   });
 });
 
-app.get("/health", (req, res) => res.status(200).send("OK"));
-app.get("/live", (req, res) => res.status(200).send("OK"));
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error("Timeout")), timeoutMs)
+    ),
+  ]);
+}
+
+app.get("/health", (req, res) => res.status(200).json({ ok: true }));
+app.get("/live", (req, res) => res.status(200).json({ ok: true }));
 app.get("/error-test", (req, res) => {
   throw new Error("Triggered test 500 error");
 });
 
 app.get("/ready", async (req, res) => {
+  const checks: Record<string, string> = {};
+  let ready = true;
+
+  const db = getDb(config.databaseUrl);
+
+  // Check database connectivity
   try {
-    const db = getDb(config.databaseUrl);
-    await db.$queryRaw`SELECT 1`;
-    
-    const redis = new Redis(config.redisUrl, { maxRetriesPerRequest: 0 });
-    await redis.ping();
-    await redis.quit();
-    
-    res.status(200).send("READY");
+    await withTimeout(db.$queryRaw`SELECT 1`, 2000);
+    checks.database = "connected";
   } catch (err) {
-    logger.error("Readiness check failed", err);
-    res.status(503).send("NOT_READY");
+    logger.error("Readiness check: database failed", err);
+    checks.database = "disconnected";
+    ready = false;
   }
+
+  // Check cache connectivity
+  try {
+    await withTimeout(redis.ping(), 2000);
+    checks.cache = "connected";
+  } catch (err) {
+    logger.error("Readiness check: cache failed", err);
+    checks.cache = "disconnected";
+    ready = false;
+  }
+
+  // Include uptime
+  const uptime_seconds = Math.floor(process.uptime());
+
+  const status = ready ? 200 : 503;
+  res.status(status).json({
+    ok: ready,
+    checks,
+    uptime_seconds,
+  });
 });
 
 app.get("/metrics", async (req, res) => {

@@ -14,7 +14,6 @@ const analytics_1 = require("./jobs/analytics");
 const db_1 = require("./db");
 const jsonwebtoken_1 = __importDefault(require("jsonwebtoken"));
 const url_1 = require("./url");
-const ioredis_1 = require("ioredis");
 const resilience_1 = require("./resilience");
 const metrics_1 = require("./metrics");
 function isDatabaseConnectionError(err) {
@@ -92,24 +91,46 @@ app.use((req, res, next) => {
         next();
     });
 });
-app.get("/health", (req, res) => res.status(200).send("OK"));
-app.get("/live", (req, res) => res.status(200).send("OK"));
+function withTimeout(promise, timeoutMs) {
+    return Promise.race([
+        promise,
+        new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout")), timeoutMs)),
+    ]);
+}
+app.get("/health", (req, res) => res.status(200).json({ ok: true }));
+app.get("/live", (req, res) => res.status(200).json({ ok: true }));
 app.get("/error-test", (req, res) => {
     throw new Error("Triggered test 500 error");
 });
 app.get("/ready", async (req, res) => {
+    const checks = {};
+    let ready = true;
+    const db = (0, db_1.getDb)(config_1.config.databaseUrl);
     try {
-        const db = (0, db_1.getDb)(config_1.config.databaseUrl);
-        await db.$queryRaw `SELECT 1`;
-        const redis = new ioredis_1.Redis(config_1.config.redisUrl, { maxRetriesPerRequest: 0 });
-        await redis.ping();
-        await redis.quit();
-        res.status(200).send("READY");
+        await withTimeout(db.$queryRaw `SELECT 1`, 2000);
+        checks.database = "connected";
     }
     catch (err) {
-        logger_1.logger.error("Readiness check failed", err);
-        res.status(503).send("NOT_READY");
+        logger_1.logger.error("Readiness check: database failed", err);
+        checks.database = "disconnected";
+        ready = false;
     }
+    try {
+        await withTimeout(redis_1.redis.ping(), 2000);
+        checks.cache = "connected";
+    }
+    catch (err) {
+        logger_1.logger.error("Readiness check: cache failed", err);
+        checks.cache = "disconnected";
+        ready = false;
+    }
+    const uptime_seconds = Math.floor(process.uptime());
+    const status = ready ? 200 : 503;
+    res.status(status).json({
+        ok: ready,
+        checks,
+        uptime_seconds,
+    });
 });
 app.get("/metrics", async (req, res) => {
     try {

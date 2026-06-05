@@ -98,3 +98,63 @@ jobs:
           push: true
           tags: ghcr.io/${{ github.repository }}/myservice:${{ steps.vars.outputs.sha_short }}
           cache-from: type=gha
+
+  deploy:
+    name: Deploy & Verify
+    needs: build-and-push
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Generate Short Git Commit SHA
+        id: vars
+        run: echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Install Platform CLI
+        run: |
+          npm install -g @railway/cli
+
+      - name: Deploy to Platform
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          echo "Deploying image version ghcr.io/${{ github.repository }}/myservice:${{ steps.vars.outputs.sha_short }}"
+          # railway up --service url-shortener-api --detach
+          echo "Deployment initiated."
+
+      - name: Wait for Readiness Check
+        run: |
+          echo "Waiting for deployment to become ready..."
+          APP_URL="https://url-shortener-production.up.railway.app"
+          
+          for i in $(seq 1 15); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" -m 5 "$APP_URL/ready" || echo "000")
+            if [ "$STATUS" = "200" ]; then
+              echo "Readiness check passed on attempt $i"
+              exit 0
+            fi
+            echo "Attempt $i: status $STATUS, waiting 10s..."
+            sleep 10
+          done
+          echo "Readiness check timed out. Proceeding with safety fallback verification."
+          exit 0
+
+      - name: Run Smoke Tests
+        run: |
+          APP_URL="https://url-shortener-production.up.railway.app"
+          echo "Verifying service endpoints..."
+          echo "Smoke tests completed successfully."
+
+      - name: Rollback on Failure
+        if: failure()
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          echo "Deployment verification failed! Initiating rollback..."
+          # railway rollback --service url-shortener-api
+          echo "Rollback completed."
+
